@@ -1,0 +1,8 @@
+services:
+  - type: web
+    name: aura-forex-backend
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
