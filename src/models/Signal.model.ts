@@ -7,19 +7,19 @@ import { VALID_PAIRS, VALID_TIMEFRAMES } from '../types/chart.types';
 const signalSchema = new Schema<ISignal>(
   {
     userId: {
-      type:     Schema.Types.ObjectId,  // was String
+      type:     Schema.Types.ObjectId,
       ref:      'User',
       required: true,
       index:    true,
     },
     pair: {
       type:     String,
-      enum:     VALID_PAIRS,            // was unvalidated string
+      enum:     VALID_PAIRS,
       required: true,
     },
     timeframe: {
       type:     String,
-      enum:     VALID_TIMEFRAMES,       // was unvalidated string
+      enum:     VALID_TIMEFRAMES,
       required: true,
     },
     signal: {
@@ -40,14 +40,22 @@ const signalSchema = new Schema<ISignal>(
     indicators:             Schema.Types.Mixed,
     patterns:               [String],
     autoTradeRecommended:   { type: Boolean, default: false },
+    // ── Quality fields ────────────────────────────────────────────────────────
+    confluenceScore:  { type: Number, min: 0, max: 8 },
+    entryType:        { type: String, enum: ['MARKET', 'LIMIT'] },
+    sessionRating:    { type: String, enum: ['PRIME', 'ACTIVE', 'AVOID'] },
+    pipsToSL:         { type: Number, min: 0 },
+    pipsToTP:         { type: Number, min: 0 },
+    invalidatesAt:    Date,
+    htfBias:          String,
   },
   { timestamps: true }
 );
 
-// TTL — documents auto-deleted after 5 minutes
-signalSchema.index({ createdAt: 1 }, { expireAfterSeconds: 300 });
+// TTL — kept 4 hours so history page can show today's signals
+signalSchema.index({ createdAt: 1 }, { expireAfterSeconds: 14_400 });
 
-// Cache lookup index — used by signal.service on every request
+// Cache lookup index
 signalSchema.index({ userId: 1, pair: 1, timeframe: 1, createdAt: -1 });
 
 // History endpoint index

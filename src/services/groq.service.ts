@@ -61,7 +61,7 @@ export async function generateSignal(
         },
       ],
       temperature: 0.3,
-      max_tokens: 1000,
+      max_tokens: 1200,
       response_format: { type: "json_object" },
     }),
   );
@@ -80,111 +80,176 @@ export async function generateSignal(
     throw new Error("Groq returned missing confidence value");
   }
 
-  const signal = parsed.signal;
+  const signal     = parsed.signal;
   const confidence = Math.min(100, Math.max(0, parsed.confidence));
+  const confluenceScore = Math.min(8, Math.max(0, parsed.confluenceScore ?? 0));
 
-  // Safety gate: never recommend an auto-trade on HOLD or low-confidence signals
+  // Safety gate: never auto-trade on HOLD, low confidence, or low confluence
   const autoTradeRecommended =
     signal !== "HOLD" &&
     confidence >= 72 &&
+    confluenceScore >= 6 &&
     parsed.autoTradeRecommended === true;
 
   return {
     signal,
     confidence,
-    bullScore: Math.min(100, Math.max(0, parsed.bullScore ?? 50)),
-    bearScore: Math.min(100, Math.max(0, parsed.bearScore ?? 50)),
-    reasoning: parsed.reasoning ?? "",
-    entry: parsed.entry ?? payload.price,
-    takeProfit: parsed.takeProfit ?? payload.price,
-    stopLoss: parsed.stopLoss ?? payload.price,
-    riskReward: parsed.riskReward ?? "1:1",
-    keyRisks: Array.isArray(parsed.keyRisks) ? parsed.keyRisks : [],
-    timeHorizon: parsed.timeHorizon ?? "Unknown",
+    bullScore:      Math.min(100, Math.max(0, parsed.bullScore ?? 50)),
+    bearScore:      Math.min(100, Math.max(0, parsed.bearScore ?? 50)),
+    reasoning:      parsed.reasoning ?? "",
+    entry:          parsed.entry ?? payload.price,
+    takeProfit:     parsed.takeProfit ?? payload.price,
+    stopLoss:       parsed.stopLoss ?? payload.price,
+    riskReward:     parsed.riskReward ?? "1:1",
+    keyRisks:       Array.isArray(parsed.keyRisks) ? parsed.keyRisks : [],
+    timeHorizon:    parsed.timeHorizon ?? "Unknown",
     autoTradeRecommended,
+    confluenceScore,
+    entryType:      (parsed.entryType === 'LIMIT' ? 'LIMIT' : 'MARKET'),
   };
 }
 
 function buildSignalPrompt(payload: SignalPayload): string {
   const price = payload.price;
   const atr   = payload.atr;
-  const aboveEma20 = price > payload.ema20 ? 'above' : 'below';
-  const aboveEma50 = price > payload.ema50 ? 'above' : 'below';
-  const macdMomentum = payload.macd.histogram > 0 ? 'bullish (positive histogram)' : 'bearish (negative histogram)';
+
+  const aboveEma20  = price > payload.ema20  ? 'above' : 'below';
+  const aboveEma50  = price > payload.ema50  ? 'above' : 'below';
+  const aboveEma200 = price > payload.ema200 ? 'above' : 'below';
+
+  const macdMomentum = payload.macd.histogram > 0
+    ? 'BULLISH (positive histogram)'
+    : 'BEARISH (negative histogram)';
+
   const rsiContext =
-    payload.rsi > 70 ? 'overbought zone' :
-    payload.rsi < 30 ? 'oversold zone' :
-    payload.rsi > 55 ? 'bullish range' :
-    payload.rsi < 45 ? 'bearish range' : 'neutral';
-  const adxContext = payload.adx >= 25 ? `trending (${payload.adx.toFixed(1)})` : `ranging/weak (${payload.adx.toFixed(1)}) — avoid counter-trend trades`;
+    payload.rsi > 70 ? 'OVERBOUGHT — BUY signals unreliable here' :
+    payload.rsi < 30 ? 'OVERSOLD — SELL signals unreliable here' :
+    payload.rsi > 55 ? 'bullish range (>55)' :
+    payload.rsi < 45 ? 'bearish range (<45)' : 'neutral (45–55)';
 
-  return `You are AURA, an elite multi-market AI trader specialising in FOREX and Gold.
-Your task: produce a high-quality signal with precise, ATR-calibrated entry, stop-loss, and take-profit levels.
+  const adxContext = payload.adx >= 25
+    ? `TRENDING (${payload.adx.toFixed(1)}) — directional trades valid`
+    : `RANGING/WEAK (${payload.adx.toFixed(1)}) — avoid trend-following entries`;
 
-═══════════════════════════════════════
-RISK MANAGEMENT RULES (mandatory)
-═══════════════════════════════════════
-• StopLoss: place 1.5× ATR beyond the nearest swing high/low or structure level.
-  ATR(14) = ${atr} → minimum SL distance = ${(atr * 1.5).toFixed(5)}
-• TakeProfit: target minimum 2:1 R:R (TP distance ≥ 2× SL distance from entry).
-  Preferred target = 2.5-3× SL distance at next significant resistance/support.
-• Entry: use current price for market entry; refine slightly for limit-order advantage if momentum is still building.
+  const bbPosition =
+    price > payload.bb.upper ? 'ABOVE upper band (overextended — caution on BUY)' :
+    price < payload.bb.lower ? 'BELOW lower band (overextended — caution on SELL)' :
+    price > payload.bb.mid   ? 'between mid and upper band' :
+                               'between mid and lower band';
 
-═══════════════════════════════════════
-AUTO-TRADE CRITERIA (all must be true)
-═══════════════════════════════════════
-Set autoTradeRecommended=true ONLY when ALL of the following apply:
-  1. signal is BUY or SELL (not HOLD)
-  2. confidence ≥ 72
-  3. ADX ≥ 25 (confirmed trend — not ranging)
-  4. Higher-TF trend AGREES with signal direction
-  5. MACD histogram AGREES with signal direction
-  6. R:R ≥ 1:2 after applying ATR-based stops
-  7. Session has adequate liquidity (London or NY preferred; Asian only for XAU/USD or USD/JPY with very strong setup)
-  8. No imminent high-impact news event (check keyRisks — if a major event is within 1 hour, set false)
+  const stochContext =
+    payload.stoch.k > 80 ? `OVERBOUGHT (${payload.stoch.k.toFixed(1)})` :
+    payload.stoch.k < 20 ? `OVERSOLD (${payload.stoch.k.toFixed(1)})` :
+                           `neutral (${payload.stoch.k.toFixed(1)})`;
 
-═══════════════════════════════════════
-MARKET DATA
-═══════════════════════════════════════
-Pair:              ${payload.pair}
-Timeframe:         ${payload.timeframe}
-Session:           ${payload.session}
-Current Price:     ${price}
-ATR(14):           ${atr}
+  const htfLabel = payload.higherTfTrend.split(':')[0]?.trim() || '4H';
+  const minSL  = (atr * 1.5).toFixed(5);
+  const minTP  = (atr * 1.5 * 2.5).toFixed(5);
 
-TECHNICAL INDICATORS (${payload.timeframe}):
-  RSI(14):         ${payload.rsi.toFixed(2)} — ${rsiContext}
-  MACD:            value=${payload.macd.value.toFixed(5)}, signal=${payload.macd.signal.toFixed(5)}, histogram=${payload.macd.histogram.toFixed(5)} — ${macdMomentum}
-  EMA20:           ${payload.ema20.toFixed(5)} | price is ${aboveEma20} EMA20
-  EMA50:           ${payload.ema50.toFixed(5)} | price is ${aboveEma50} EMA50
-  Bollinger Bands: Upper=${payload.bb.upper}, Mid=${payload.bb.mid}, Lower=${payload.bb.lower}
-  Stochastic:      %K=${payload.stoch.k}, %D=${payload.stoch.d}
-  ADX:             ${adxContext}
+  return `You are AURA — an institutional-grade FOREX and Gold AI analyst.
+Your output will be placed on a LIVE trading account. Be precise. Protect capital first.
 
-HIGHER TIMEFRAME CONTEXT:
+═══════════════════════════════════════════════════════
+SESSION & MARKET CONTEXT
+═══════════════════════════════════════════════════════
+Pair:            ${payload.pair}
+Timeframe:       ${payload.timeframe}
+Session:         ${payload.session}
+Session Rating:  ${payload.sessionRating}  (PRIME=ideal, ACTIVE=tradeable, AVOID=do not trade)
+Current Price:   ${price}
+ATR(14):         ${atr.toFixed(5)}  →  min SL distance=${minSL}  |  min TP distance=${minTP}
+
+MULTI-TIMEFRAME BIAS:
+  Daily:         ${payload.dailyTrend}
   ${payload.higherTfTrend}
 
-PATTERNS DETECTED: ${payload.patterns.length > 0 ? payload.patterns.join(', ') : 'None'}
-NEWS SENTIMENT:    ${payload.newsSentiment}
-USER RULES:        ${payload.ragContext || 'None provided'}
-${payload.accuracyContext ? `ACCURACY HISTORY:  ${payload.accuracyContext}` : ''}
-${payload.tradingContext  ? `PERSONAL EDGE:     ${payload.tradingContext}`  : ''}
+═══════════════════════════════════════════════════════
+TECHNICAL INDICATORS — ${payload.timeframe}
+═══════════════════════════════════════════════════════
+  RSI(14):      ${payload.rsi.toFixed(2)} — ${rsiContext}
+  MACD:         histogram=${payload.macd.histogram.toFixed(5)} — ${macdMomentum}
+  EMA20:        ${payload.ema20.toFixed(5)}  price is ${aboveEma20} EMA20
+  EMA50:        ${payload.ema50.toFixed(5)}  price is ${aboveEma50} EMA50
+  EMA200:       ${payload.ema200.toFixed(5)}  price is ${aboveEma200} EMA200 (macro bias)
+  BB:           price ${bbPosition}
+    Upper=${payload.bb.upper.toFixed(5)} | Mid=${payload.bb.mid.toFixed(5)} | Lower=${payload.bb.lower.toFixed(5)}
+  Stochastic:   %K=${stochContext}  %D=${payload.stoch.d.toFixed(1)}
+  ADX:          ${adxContext}
+  Patterns:     ${payload.patterns.length > 0 ? payload.patterns.join(', ') : 'None detected'}
 
-═══════════════════════════════════════
-OUTPUT — valid JSON only, no markdown
-═══════════════════════════════════════
+═══════════════════════════════════════════════════════
+CONFLUENCE CHECKLIST — score 1 point each (total → confluenceScore 0-8)
+═══════════════════════════════════════════════════════
+  [1] Daily trend AGREES with proposed signal direction
+  [2] ${htfLabel} trend AGREES with proposed signal direction
+  [3] EMA20 and EMA50 both aligned with signal (price above both for BUY / below both for SELL)
+  [4] RSI supports direction (>50 for BUY, <50 for SELL; NOT in opposing extreme)
+  [5] MACD histogram AGREES (positive for BUY, negative for SELL)
+  [6] ADX ≥ 25 (confirmed trend strength)
+  [7] Stochastic NOT in opposing extreme (%K < 80 for BUY entry; %K > 20 for SELL entry)
+  [8] Candlestick pattern or BB level supports signal
+
+QUALITY THRESHOLDS:
+  confluenceScore ≥ 6 → A+ setup → full confidence BUY/SELL
+  confluenceScore 4–5 → B setup → BUY/SELL with reduced conviction
+  confluenceScore ≤ 3 → MANDATORY HOLD — insufficient confluence
+
+═══════════════════════════════════════════════════════
+ADDITIONAL CONTEXT
+═══════════════════════════════════════════════════════
+News Sentiment:  ${payload.newsSentiment}
+User Rules:      ${payload.ragContext || 'None provided'}
+${payload.accuracyContext ? `Signal History:  ${payload.accuracyContext}` : ''}
+${payload.tradingContext  ? `Personal Edge:   ${payload.tradingContext}`  : ''}
+
+═══════════════════════════════════════════════════════
+MANDATORY HOLD — output HOLD if ANY of these apply:
+═══════════════════════════════════════════════════════
+  ✗ confluenceScore ≤ 3 (not enough indicators aligned)
+  ✗ ADX < 20 AND no strong candlestick reversal pattern (choppy market)
+  ✗ RSI > 70 with BUY signal, OR RSI < 30 with SELL signal (counter-extreme)
+  ✗ Daily AND ${htfLabel} BOTH oppose the proposed signal direction
+  ✗ MACD and RSI give OPPOSITE signals (momentum conflict — no edge)
+  ✗ Cannot achieve R:R ≥ 1:2 without violating ATR-based SL rules
+  ✗ Session Rating is AVOID
+
+═══════════════════════════════════════════════════════
+RISK MANAGEMENT (mandatory)
+═══════════════════════════════════════════════════════
+  Stop Loss:   1.5× ATR beyond nearest swing = ${minSL} minimum distance
+  Take Profit: 2.5× SL distance = ${minTP} minimum distance from entry
+  Entry Type:  MARKET if price is at structure now; LIMIT if price should retrace first
+  R:R MUST be ≥ 1:2. If not achievable, output HOLD.
+
+═══════════════════════════════════════════════════════
+AUTO-TRADE — set true only if ALL are true:
+═══════════════════════════════════════════════════════
+  1. signal = BUY or SELL
+  2. confidence ≥ 72
+  3. confluenceScore ≥ 6
+  4. ADX ≥ 25
+  5. Both Daily AND ${htfLabel} agree with signal
+  6. R:R ≥ 1:2
+  7. Session is PRIME or ACTIVE
+  8. No high-impact news within 1 hour
+
+═══════════════════════════════════════════════════════
+OUTPUT — valid JSON only, no markdown, no extra text
+═══════════════════════════════════════════════════════
 {
   "signal": "BUY" | "SELL" | "HOLD",
   "confidence": 0-100,
   "bullScore": 0-100,
   "bearScore": 0-100,
-  "reasoning": "3-4 sentence analysis citing specific indicator values, price vs EMAs, and ATR-based levels",
+  "confluenceScore": 0-8,
+  "entryType": "MARKET" | "LIMIT",
+  "reasoning": "3-4 sentences. Must cite: (1) multi-TF bias alignment, (2) which indicators align or conflict, (3) exact entry/SL/TP price levels and why, (4) what would invalidate the setup.",
   "entry": number,
-  "takeProfit": number (min 2× SL distance from entry),
-  "stopLoss": number (1.5× ATR from entry, beyond structure),
+  "takeProfit": number,
+  "stopLoss": number,
   "riskReward": "1:X.X",
-  "keyRisks": ["risk1", "risk2", "risk3"],
-  "timeHorizon": "e.g. 2-4 hours",
+  "keyRisks": ["risk1", "risk2"],
+  "timeHorizon": "e.g. 4-8 hours",
   "autoTradeRecommended": true | false
 }`;
 }

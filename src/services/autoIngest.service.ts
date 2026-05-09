@@ -9,6 +9,7 @@ import RagEmbedding from '../models/RagEmbedding.model';
 import { generateBatchEmbeddings } from './embedding.service';
 import { chunkText } from './rag.service';
 import { ITrade } from '../types/trade.types';
+import { TRADING_KNOWLEDGE_LIBRARY } from '../data/tradingKnowledge';
 
 // ─── Ingest a closed trade review into the knowledge base ─────────────────────
 // Called after auto-review completes so every closed trade with an AI verdict
@@ -153,6 +154,60 @@ async function _indexText(
   }
 
   await doc.save();
+}
+
+// ─── Seed Default Knowledge Library ──────────────────────────────────────────
+// Ingests the 12-document trading strategy library into a user's knowledge base.
+// Idempotent: checks for existing seeded documents and skips already-indexed ones.
+
+export interface SeedResult {
+  seeded: number;
+  skipped: number;
+  errors: number;
+}
+
+export async function seedDefaultKnowledge(userId: string): Promise<SeedResult> {
+  const result: SeedResult = { seeded: 0, skipped: 0, errors: 0 };
+
+  // Find all already-seeded tags for this user in one query
+  const existing = await RagDocument.find({
+    userId: new Types.ObjectId(userId),
+    'metadata.seeded': true,
+  }).select('metadata').lean();
+
+  const existingTags = new Set(
+    existing.map((d: any) => d.metadata?.tag as string).filter(Boolean)
+  );
+
+  for (const doc of TRADING_KNOWLEDGE_LIBRARY) {
+    if (existingTags.has(doc.tag)) {
+      result.skipped++;
+      continue;
+    }
+    try {
+      await _indexText(userId, doc.text, 'rule', doc.pair, doc.tag, {
+        seeded: true,
+        title: doc.title,
+      });
+      result.seeded++;
+    } catch {
+      result.errors++;
+    }
+  }
+
+  return result;
+}
+
+// ─── Get seeded knowledge docs ────────────────────────────────────────────────
+
+export async function getSeededDocs(userId: string) {
+  return RagDocument.find({
+    userId: new Types.ObjectId(userId),
+    'metadata.seeded': true,
+  })
+    .sort({ createdAt: 1 })
+    .select('fileName type metadata status chunkCount createdAt')
+    .lean();
 }
 
 // ─── Types ────────────────────────────────────────────────────────────────────

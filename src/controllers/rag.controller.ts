@@ -17,6 +17,8 @@ import {
 import {
   ingestEconomicCalendar,
   getAutoFeedDocs,
+  seedDefaultKnowledge,
+  getSeededDocs,
 } from '../services/autoIngest.service';
 import RagDocument from '../models/RagDocument.model';
 import { Types } from 'mongoose';
@@ -152,5 +154,23 @@ export const ingestCalendarController = asyncHandler(
   async (req: Request, res: Response) => {
     const count = await ingestEconomicCalendar(req.user!.id);
     sendSuccess(res, { eventsIngested: count });
+  }
+);
+
+// ─── Seed Default Knowledge Library ──────────────────────────────────────────
+
+export const seedKnowledgeController = asyncHandler(
+  async (req: Request, res: Response) => {
+    const result = await seedDefaultKnowledge(req.user!.id);
+    sendSuccess(res, result);
+  }
+);
+
+// ─── Get Seeded Knowledge Docs ────────────────────────────────────────────────
+
+export const getSeededDocsController = asyncHandler(
+  async (req: Request, res: Response) => {
+    const docs = await getSeededDocs(req.user!.id);
+    sendSuccess(res, docs);
   }
 );

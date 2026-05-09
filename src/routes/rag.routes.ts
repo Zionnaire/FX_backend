@@ -11,6 +11,8 @@ import {
   addManualEntryController,
   getAutoFeedController,
   ingestCalendarController,
+  seedKnowledgeController,
+  getSeededDocsController,
 } from "../controllers/rag.controller";
 
 const ragRouter = Router();
@@ -24,5 +26,7 @@ ragRouter.post("/query", queryKnowledgeBaseController);
 ragRouter.post("/manual", addManualEntryController);
 ragRouter.get("/auto-feed", getAutoFeedController);
 ragRouter.post("/auto-feed/calendar", ingestCalendarController);
+ragRouter.post("/seed", seedKnowledgeController);
+ragRouter.get("/seed", getSeededDocsController);
 
 export default ragRouter;

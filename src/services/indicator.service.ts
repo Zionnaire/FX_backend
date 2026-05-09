@@ -6,6 +6,7 @@ export interface Indicators {
   sma50: number;
   ema20: number;
   ema50: number;
+  ema200?: number;
   rsi: number;
   macd: {
     value: number;
@@ -49,8 +50,9 @@ export function computeAll(candles: IOHLCV[]): Indicators {
   return {
     sma20: indicators.sma(closes, 20),
     sma50: indicators.sma(closes, 50),
-    ema20: indicators.ema(closes, 20),
-    ema50: indicators.ema(closes, 50),
+    ema20:  indicators.ema(closes, 20),
+    ema50:  indicators.ema(closes, 50),
+    ema200: candles.length >= 200 ? indicators.ema(closes, 200) : undefined,
     rsi: indicators.rsi(closes),
     macd: indicators.macd(closes),
     bb: indicators.bollingerBands(closes),
