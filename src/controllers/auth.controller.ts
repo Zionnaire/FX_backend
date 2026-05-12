@@ -19,11 +19,17 @@ import env from '../config/env';
 
 // ─── Cookie Config ────────────────────────────────────────────────────────────
 
+const isProd = env.nodeEnv === 'production';
+
+// SameSite=None is required when the frontend and backend are on different
+// domains (cross-site). Strict/Lax both block the cookie in cross-origin
+// AJAX requests, causing restore() to fail and logging the user out on refresh.
 const REFRESH_COOKIE_OPTIONS = {
   httpOnly: true,
-  secure: env.nodeEnv === 'production',
-  sameSite: 'strict' as const,
+  secure: isProd,
+  sameSite: (isProd ? 'none' : 'lax') as 'none' | 'lax',
   maxAge: 7 * 24 * 60 * 60 * 1000,
+  path: '/',
 };
 
 // ─── Safe User Shape ──────────────────────────────────────────────────────────
@@ -162,8 +168,9 @@ export const logout = asyncHandler(async (req: Request, res: Response) => {
 
   res.clearCookie('refreshToken', {
     httpOnly: true,
-    secure: env.nodeEnv === 'production',
-    sameSite: 'strict',
+    secure: isProd,
+    sameSite: (isProd ? 'none' : 'lax') as 'none' | 'lax',
+    path: '/',
   });
 
   sendSuccess(res, null, 'Logged out successfully');
