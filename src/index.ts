@@ -26,6 +26,7 @@ import analyticsRoutes from './routes/analytics.routes';
 
 import { checkAlerts } from './services/alert.service';
 import { evaluatePendingSignals } from './services/signalAccuracy.service';
+import { monitorOpenTrades } from './services/tradeMonitor.service';
 
 // ─── App Setup ────────────────────────────────────────────────────────────────
 
@@ -88,18 +89,20 @@ app.use(errorHandler);
 
 // ─── Interval Handles (kept for graceful shutdown cleanup) ────────────────────
 
-let alertInterval:    ReturnType<typeof setInterval> | null = null;
-let accuracyInterval: ReturnType<typeof setInterval> | null = null;
-let keepAliveInterval: ReturnType<typeof setInterval> | null = null;
+let alertInterval:        ReturnType<typeof setInterval> | null = null;
+let accuracyInterval:     ReturnType<typeof setInterval> | null = null;
+let keepAliveInterval:    ReturnType<typeof setInterval> | null = null;
+let tradeMonitorInterval: ReturnType<typeof setInterval> | null = null;
 
 // ─── Graceful Shutdown ────────────────────────────────────────────────────────
 
 const shutdown = (signal: string) => {
   console.log(`\n${signal} received — shutting down gracefully`);
 
-  if (alertInterval)    clearInterval(alertInterval);
-  if (accuracyInterval) clearInterval(accuracyInterval);
-  if (keepAliveInterval) clearInterval(keepAliveInterval);
+  if (alertInterval)        clearInterval(alertInterval);
+  if (accuracyInterval)     clearInterval(accuracyInterval);
+  if (keepAliveInterval)    clearInterval(keepAliveInterval);
+  if (tradeMonitorInterval) clearInterval(tradeMonitorInterval);
 
   // Give in-flight requests 10s to finish, then force close
   const forceExit = setTimeout(() => {
@@ -139,6 +142,20 @@ const bootstrap = async (): Promise<void> => {
 
     app.listen(PORT, () => {
       console.log(`✅ Server running on port ${PORT} [${env.nodeEnv}]`);
+    });
+
+    // Trade monitor — checks open trades against SL/TP every 60s
+    tradeMonitorInterval = setInterval(async () => {
+      try {
+        await monitorOpenTrades();
+      } catch (err) {
+        console.error('Trade monitor failed:', err);
+      }
+    }, 60_000);
+
+    // Run once immediately at startup to catch any already-breached trades
+    setImmediate(async () => {
+      try { await monitorOpenTrades(); } catch { /* silent */ }
     });
 
     // Alert checker — runs every 60s (or env-configured interval)
