@@ -32,8 +32,8 @@ function calcPnL(
   return Math.round(pnl * 100) / 100;
 }
 
-function calcDuration(createdAt: Date | string): string {
-  const ms = Date.now() - new Date(createdAt).getTime();
+function calcDuration(createdAt: Date | string | undefined): string {
+  const ms = Date.now() - new Date(createdAt ?? Date.now()).getTime();
   const h  = Math.floor(ms / 3_600_000);
   const m  = Math.floor((ms % 3_600_000) / 60_000);
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
