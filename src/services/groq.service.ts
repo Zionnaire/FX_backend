@@ -83,12 +83,13 @@ export async function generateSignal(
   const signal     = parsed.signal;
   const confidence = Math.min(100, Math.max(0, parsed.confidence));
   const confluenceScore = Math.min(8, Math.max(0, parsed.confluenceScore ?? 0));
+  const isScalp = payload.tradingStyle === 'scalp';
 
-  // Safety gate: never auto-trade on HOLD, low confidence, or low confluence
+  // Safety gate: thresholds differ between scalp and swing
   const autoTradeRecommended =
     signal !== "HOLD" &&
-    confidence >= 72 &&
-    confluenceScore >= 6 &&
+    confidence >= (isScalp ? 65 : 72) &&
+    confluenceScore >= (isScalp ? 5 : 6) &&
     parsed.autoTradeRecommended === true;
 
   return {
@@ -109,9 +110,28 @@ export async function generateSignal(
   };
 }
 
+const BULLISH_PATTERNS = new Set([
+  'Bullish Engulfing', 'Hammer',
+  'Three White Soldiers', 'Three Inside Up', 'Three Outside Up', 'Morning Star',
+]);
+const BEARISH_PATTERNS = new Set([
+  'Bearish Engulfing', 'Shooting Star',
+  'Three Black Crows', 'Three Inside Down', 'Three Outside Down', 'Evening Star',
+]);
+
+function formatPatternsForPrompt(patterns: string[]): string {
+  if (patterns.length === 0) return 'None detected';
+  return patterns.map(p => {
+    if (BULLISH_PATTERNS.has(p)) return `${p} [BULLISH ↑]`;
+    if (BEARISH_PATTERNS.has(p)) return `${p} [BEARISH ↓]`;
+    return p;
+  }).join(', ');
+}
+
 function buildSignalPrompt(payload: SignalPayload): string {
-  const price = payload.price;
-  const atr   = payload.atr;
+  const price   = payload.price;
+  const atr     = payload.atr;
+  const isScalp = payload.tradingStyle === 'scalp';
 
   const aboveEma20  = price > payload.ema20  ? 'above' : 'below';
   const aboveEma50  = price > payload.ema50  ? 'above' : 'below';
@@ -127,9 +147,10 @@ function buildSignalPrompt(payload: SignalPayload): string {
     payload.rsi > 55 ? 'bullish range (>55)' :
     payload.rsi < 45 ? 'bearish range (<45)' : 'neutral (45–55)';
 
-  const adxContext = payload.adx >= 25
+  const adxThreshold = isScalp ? 15 : 25;
+  const adxContext = payload.adx >= adxThreshold
     ? `TRENDING (${payload.adx.toFixed(1)}) — directional trades valid`
-    : `RANGING/WEAK (${payload.adx.toFixed(1)}) — avoid trend-following entries`;
+    : `RANGING/WEAK (${payload.adx.toFixed(1)}) — ${isScalp ? 'momentum scalp only' : 'avoid trend-following entries'}`;
 
   const bbPosition =
     price > payload.bb.upper ? 'ABOVE upper band (overextended — caution on BUY)' :
@@ -143,10 +164,21 @@ function buildSignalPrompt(payload: SignalPayload): string {
                            `neutral (${payload.stoch.k.toFixed(1)})`;
 
   const htfLabel = payload.higherTfTrend.split(':')[0]?.trim() || '4H';
-  const minSL  = (atr * 1.5).toFixed(5);
-  const minTP  = (atr * 1.5 * 2.5).toFixed(5);
+
+  // Scalp: tighter SL/TP scaled to quick moves; swing: ATR × 1.5 / × 3.75
+  const minSL = isScalp ? (atr * 0.5).toFixed(5) : (atr * 1.5).toFixed(5);
+  const minTP = isScalp ? (atr * 0.75).toFixed(5) : (atr * 1.5 * 2.5).toFixed(5);
+  const minRR = isScalp ? '1:1.5' : '1:2';
+
+  const modeHeader = isScalp
+    ? '⚡ SCALP MODE — Quick-profit intraday trades (5–30 min hold, 5–15 pip TP)'
+    : '📊 SWING MODE — Multi-hour positional trades with full confluence';
+
+  const confluenceMin  = isScalp ? 3 : 6;
+  const confluenceGood = isScalp ? 5 : 8;
 
   return `You are AURA — an institutional-grade FOREX and Gold AI analyst.
+${modeHeader}
 Your output will be placed on a LIVE trading account. Be precise. Protect capital first.
 
 ═══════════════════════════════════════════════════════
@@ -154,10 +186,11 @@ SESSION & MARKET CONTEXT
 ═══════════════════════════════════════════════════════
 Pair:            ${payload.pair}
 Timeframe:       ${payload.timeframe}
+Trading Style:   ${isScalp ? 'SCALP (fast, 5-30 min, tight SL/TP)' : 'SWING (multi-hour, full confluence required)'}
 Session:         ${payload.session}
-Session Rating:  ${payload.sessionRating}  (PRIME=ideal, ACTIVE=tradeable, AVOID=do not trade)
+Session Rating:  ${payload.sessionRating}  (PRIME=ideal, ACTIVE=tradeable, AVOID=low liquidity)
 Current Price:   ${price}
-ATR(14):         ${atr.toFixed(5)}  →  min SL distance=${minSL}  |  min TP distance=${minTP}
+ATR(14):         ${atr.toFixed(5)}  →  min SL=${minSL}  |  min TP=${minTP}
 
 MULTI-TIMEFRAME BIAS:
   Daily:         ${payload.dailyTrend}
@@ -175,7 +208,7 @@ TECHNICAL INDICATORS — ${payload.timeframe}
     Upper=${payload.bb.upper.toFixed(5)} | Mid=${payload.bb.mid.toFixed(5)} | Lower=${payload.bb.lower.toFixed(5)}
   Stochastic:   %K=${stochContext}  %D=${payload.stoch.d.toFixed(1)}
   ADX:          ${adxContext}
-  Patterns:     ${payload.patterns.length > 0 ? payload.patterns.join(', ') : 'None detected'}
+  Patterns:     ${formatPatternsForPrompt(payload.patterns)}
 
 ═══════════════════════════════════════════════════════
 CONFLUENCE CHECKLIST — score 1 point each (total → confluenceScore 0-8)
@@ -185,14 +218,23 @@ CONFLUENCE CHECKLIST — score 1 point each (total → confluenceScore 0-8)
   [3] EMA20 and EMA50 both aligned with signal (price above both for BUY / below both for SELL)
   [4] RSI supports direction (>50 for BUY, <50 for SELL; NOT in opposing extreme)
   [5] MACD histogram AGREES (positive for BUY, negative for SELL)
-  [6] ADX ≥ 25 (confirmed trend strength)
+  [6] ADX ≥ ${adxThreshold} (confirmed momentum)
   [7] Stochastic NOT in opposing extreme (%K < 80 for BUY entry; %K > 20 for SELL entry)
   [8] Candlestick pattern or BB level supports signal
 
-QUALITY THRESHOLDS:
-  confluenceScore ≥ 6 → A+ setup → full confidence BUY/SELL
-  confluenceScore 4–5 → B setup → BUY/SELL with reduced conviction
-  confluenceScore ≤ 3 → MANDATORY HOLD — insufficient confluence
+QUALITY THRESHOLDS (${isScalp ? 'SCALP MODE' : 'SWING MODE'}):
+  confluenceScore ≥ ${confluenceGood} → A+ setup → full confidence BUY/SELL
+  confluenceScore ${confluenceMin}–${confluenceGood - 1} → B setup → BUY/SELL with reduced conviction
+  confluenceScore < ${confluenceMin} → MANDATORY HOLD — insufficient confluence
+
+═══════════════════════════════════════════════════════
+KEY STRUCTURE LEVELS (nearest support & resistance)
+═══════════════════════════════════════════════════════
+${payload.keyLevels || 'No key levels identified'}
+
+  ⚠ SL MUST be placed BEYOND the nearest structure level, not mid-air.
+  ⚠ TP MUST target the next structure level — do not set TP past resistance (BUY) or support (SELL).
+  ⚠ If price is already AT a key level, factor this into entry type (LIMIT vs MARKET).
 
 ═══════════════════════════════════════════════════════
 ADDITIONAL CONTEXT
@@ -205,33 +247,41 @@ ${payload.tradingContext  ? `Personal Edge:   ${payload.tradingContext}`  : ''}
 ═══════════════════════════════════════════════════════
 MANDATORY HOLD — output HOLD if ANY of these apply:
 ═══════════════════════════════════════════════════════
-  ✗ confluenceScore ≤ 3 (not enough indicators aligned)
-  ✗ ADX < 20 AND no strong candlestick reversal pattern (choppy market)
+  ✗ confluenceScore < ${confluenceMin} (not enough indicators aligned)
   ✗ RSI > 70 with BUY signal, OR RSI < 30 with SELL signal (counter-extreme)
-  ✗ Daily AND ${htfLabel} BOTH oppose the proposed signal direction
   ✗ MACD and RSI give OPPOSITE signals (momentum conflict — no edge)
-  ✗ Cannot achieve R:R ≥ 1:2 without violating ATR-based SL rules
-  ✗ Session Rating is AVOID
+  ✗ Cannot achieve R:R ≥ ${minRR} within SL rules
+${isScalp ? `  ✗ ATR is too low to achieve minimum 5-pip profit target (no momentum)
+  ✗ Price is not near a clear support/resistance level or EMA bounce point` :
+`  ✗ ADX < 20 AND no strong candlestick reversal pattern (choppy market)
+  ✗ Daily AND ${htfLabel} BOTH oppose the proposed signal direction
+  ✗ Session Rating is AVOID`}
 
 ═══════════════════════════════════════════════════════
-RISK MANAGEMENT (mandatory)
+RISK MANAGEMENT (mandatory — ${isScalp ? 'SCALP' : 'SWING'} rules)
 ═══════════════════════════════════════════════════════
-  Stop Loss:   1.5× ATR beyond nearest swing = ${minSL} minimum distance
+${isScalp ?
+`  Stop Loss:   0.5× ATR or nearest micro-structure = ${minSL} minimum distance (3–8 pips)
+  Take Profit: Target 5–15 pips from entry; min 1.5× SL distance = ${minTP}
+  Entry Type:  MARKET preferred for scalps; LIMIT only if clear retrace expected
+  R:R MUST be ≥ 1:1.5 for scalp. If not achievable, output HOLD.
+  Time Horizon: 5–30 minutes. Do not hold through news events.` :
+`  Stop Loss:   1.5× ATR beyond nearest swing = ${minSL} minimum distance
   Take Profit: 2.5× SL distance = ${minTP} minimum distance from entry
   Entry Type:  MARKET if price is at structure now; LIMIT if price should retrace first
-  R:R MUST be ≥ 1:2. If not achievable, output HOLD.
+  R:R MUST be ≥ 1:2. If not achievable, output HOLD.`}
 
 ═══════════════════════════════════════════════════════
 AUTO-TRADE — set true only if ALL are true:
 ═══════════════════════════════════════════════════════
   1. signal = BUY or SELL
-  2. confidence ≥ 72
-  3. confluenceScore ≥ 6
-  4. ADX ≥ 25
-  5. Both Daily AND ${htfLabel} agree with signal
-  6. R:R ≥ 1:2
-  7. Session is PRIME or ACTIVE
-  8. No high-impact news within 1 hour
+  2. confidence ≥ ${isScalp ? 65 : 72}
+  3. confluenceScore ≥ ${isScalp ? 5 : 6}
+  4. ADX ≥ ${adxThreshold}
+  5. ${isScalp ? 'Price near EMA20/EMA50 or clear BB level (structure entry)' : `Both Daily AND ${htfLabel} agree with signal`}
+  6. R:R ≥ ${minRR}
+  7. Session is ${isScalp ? 'PRIME, ACTIVE, or AVOID (scalpers can trade any session with sufficient ATR)' : 'PRIME or ACTIVE'}
+  8. No high-impact news within ${isScalp ? '15 minutes' : '1 hour'}
 
 ═══════════════════════════════════════════════════════
 OUTPUT — valid JSON only, no markdown, no extra text
@@ -243,13 +293,13 @@ OUTPUT — valid JSON only, no markdown, no extra text
   "bearScore": 0-100,
   "confluenceScore": 0-8,
   "entryType": "MARKET" | "LIMIT",
-  "reasoning": "3-4 sentences. Must cite: (1) multi-TF bias alignment, (2) which indicators align or conflict, (3) exact entry/SL/TP price levels and why, (4) what would invalidate the setup.",
+  "reasoning": "3-4 sentences. Must cite: (1) ${isScalp ? 'momentum and structure level for entry' : 'multi-TF bias alignment'}, (2) which indicators align or conflict, (3) exact entry/SL/TP price levels and why, (4) what would invalidate the setup.",
   "entry": number,
   "takeProfit": number,
   "stopLoss": number,
   "riskReward": "1:X.X",
   "keyRisks": ["risk1", "risk2"],
-  "timeHorizon": "e.g. 4-8 hours",
+  "timeHorizon": "${isScalp ? 'e.g. 5-15 minutes' : 'e.g. 4-8 hours'}",
   "autoTradeRecommended": true | false
 }`;
 }

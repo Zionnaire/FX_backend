@@ -67,8 +67,11 @@ export function detectPatterns(candles: IOHLCV[]): string[] {
   if (candles.length < 3) return [];
 
   const patterns: string[] = [];
+  const n = candles.length;
   const last3 = candles.slice(-3);
   const [prev2, prev, curr] = last3;
+
+  // ── Two-candle / single-candle patterns ──────────────────────────────────
 
   // Bullish Engulfing
   const prevBearish = prev.close < prev.open;
@@ -92,7 +95,7 @@ export function detectPatterns(candles: IOHLCV[]): string[] {
     patterns.push('Hammer');
   }
 
-  // Shooting Star (inverse hammer on bearish candle)
+  // Shooting Star
   if (curr.close < curr.open && currUpperWick > 2 * currBody && currLowerWick < 0.3 * currBody) {
     patterns.push('Shooting Star');
   }
@@ -100,6 +103,79 @@ export function detectPatterns(candles: IOHLCV[]): string[] {
   // Doji
   if (Math.abs(curr.close - curr.open) < (curr.high - curr.low) * 0.1) {
     patterns.push('Doji');
+  }
+
+  // ── Caginalp & Laurent (1998) three-day patterns ─────────────────────────
+  // Trend context: compare first half vs second half of the 6 candles before the pattern
+  const trendWindow = candles.slice(Math.max(0, n - 9), n - 3);
+  const downtrend = trendWindow.length >= 3 &&
+    trendWindow[trendWindow.length - 1].close < trendWindow[0].close;
+  const uptrend = trendWindow.length >= 3 &&
+    trendWindow[trendWindow.length - 1].close > trendWindow[0].close;
+
+  const [d1, d2, d3] = last3;
+  const d1Bull = d1.close > d1.open;
+  const d1Bear = d1.close < d1.open;
+  const d2Bull = d2.close > d2.open;
+  const d2Bear = d2.close < d2.open;
+  const d3Bull = d3.close > d3.open;
+  const d3Bear = d3.close < d3.open;
+  const d1Body = Math.abs(d1.close - d1.open);
+  const d2Body = Math.abs(d2.close - d2.open);
+  const d1Mid  = (d1.open + d1.close) / 2;
+
+  // Three White Soldiers: downtrend + 3 white candles, each opens inside prev body, closes higher
+  if (downtrend && d1Bull && d2Bull && d3Bull &&
+      d2.open > d1.open && d2.open < d1.close &&
+      d3.open > d2.open && d3.open < d2.close &&
+      d2.close > d1.close && d3.close > d2.close) {
+    patterns.push('Three White Soldiers');
+  }
+
+  // Three Black Crows: uptrend + 3 black candles, each opens inside prev body, closes lower
+  if (uptrend && d1Bear && d2Bear && d3Bear &&
+      d2.open < d1.open && d2.open > d1.close &&
+      d3.open < d2.open && d3.open > d2.close &&
+      d2.close < d1.close && d3.close < d2.close) {
+    patterns.push('Three Black Crows');
+  }
+
+  // Three Inside Up: black d1, white d2 contained inside d1 (harami), d3 white closes above d1 open
+  if (d1Bear && d2Bull &&
+      d2.open >= d1.close && d2.close <= d1.open &&
+      d3Bull && d3.close > d1.open) {
+    patterns.push('Three Inside Up');
+  }
+
+  // Three Inside Down: white d1, black d2 contained inside d1 (harami), d3 black closes below d1 open
+  if (d1Bull && d2Bear &&
+      d2.open <= d1.close && d2.close >= d1.open &&
+      d3Bear && d3.close < d1.open) {
+    patterns.push('Three Inside Down');
+  }
+
+  // Three Outside Up: black d1, white d2 engulfs d1, d3 white continues higher
+  if (d1Bear && d2Bull &&
+      d2.open <= d1.close && d2.close >= d1.open &&
+      d3Bull && d3.close > d2.close) {
+    patterns.push('Three Outside Up');
+  }
+
+  // Three Outside Down: white d1, black d2 engulfs d1, d3 black continues lower
+  if (d1Bull && d2Bear &&
+      d2.open >= d1.close && d2.close <= d1.open &&
+      d3Bear && d3.close < d2.close) {
+    patterns.push('Three Outside Down');
+  }
+
+  // Morning Star: black large d1, small-body d2 (star), white d3 closes past d1 midpoint
+  if (d1Bear && d2Body < d1Body * 0.3 && d3Bull && d3.close > d1Mid) {
+    patterns.push('Morning Star');
+  }
+
+  // Evening Star: white large d1, small-body d2 (star), black d3 closes past d1 midpoint
+  if (d1Bull && d2Body < d1Body * 0.3 && d3Bear && d3.close < d1Mid) {
+    patterns.push('Evening Star');
   }
 
   return patterns;

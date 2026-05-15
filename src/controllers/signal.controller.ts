@@ -14,9 +14,11 @@ import { VALID_PAIRS, VALID_TIMEFRAMES } from '../types/chart.types';
 
 export const getSignalController = asyncHandler(
   async (req: Request, res: Response) => {
-    const userId    = req.user!.id;                          // was req.user?.id! — unsafe combo
-    const pair      = req.params.pair;
-    const timeframe = String(req.query.timeframe || '1h');
+    const userId       = req.user!.id;
+    const pair         = req.params.pair;
+    const timeframe    = String(req.query.timeframe || '1h');
+    const rawStyle     = String(req.query.style || 'swing');
+    const tradingStyle = rawStyle === 'scalp' ? 'scalp' : 'swing';
 
     if (!VALID_PAIRS.includes(pair as typeof VALID_PAIRS[number])) {
       sendBadRequest(res, `Invalid pair. Must be one of: ${VALID_PAIRS.join(', ')}`);
@@ -29,7 +31,7 @@ export const getSignalController = asyncHandler(
     }
 
     try {
-      const signal = await getSignal(userId, pair, timeframe);
+      const signal = await getSignal(userId, pair, timeframe, tradingStyle);
       sendSuccess(res, signal);
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to generate signal';

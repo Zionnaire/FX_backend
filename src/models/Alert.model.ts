@@ -16,12 +16,24 @@ const VALID_CONDITIONS = [
 ] as const;
 
 const VALID_PATTERNS = [
+  // Two-candle / single-candle
   'Bullish Engulfing',
   'Bearish Engulfing',
   'Hammer',
   'Shooting Star',
   'Doji',
+  // Caginalp & Laurent (1998) three-day statistically validated patterns
+  'Three White Soldiers',
+  'Three Black Crows',
+  'Three Inside Up',
+  'Three Inside Down',
+  'Three Outside Up',
+  'Three Outside Down',
+  'Morning Star',
+  'Evening Star',
 ] as const;
+
+const VALID_TIMEFRAMES = ['1m', '5m', '15m', '1h', '4h', '1d'] as const;
 
 const alertSchema = new Schema<IAlert>(
   {
@@ -64,10 +76,14 @@ const alertSchema = new Schema<IAlert>(
     targetPattern: {
       type: String,
       enum: VALID_PATTERNS,
-      // required only when condition is pattern_detected
       required: function (this: IAlert) {
         return this.condition === 'pattern_detected';
       },
+    },
+    timeframe: {
+      type: String,
+      enum: VALID_TIMEFRAMES,
+      default: '1h',
     },
     type: {
       type: String,

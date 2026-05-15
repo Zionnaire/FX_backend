@@ -28,6 +28,7 @@ export async function checkAlerts(): Promise<void> {
 
 async function evaluateAlert(alert: any): Promise<boolean> {
   const { condition, targetValue, targetPattern, pair } = alert;
+  const tf = alert.timeframe || '1h';
 
   try {
     if (condition.startsWith('price_')) {
@@ -41,18 +42,17 @@ async function evaluateAlert(alert: any): Promise<boolean> {
     }
 
     if (condition.startsWith('rsi_')) {
-      const candles = await getOHLCV(pair, '1h');
+      const candles = await getOHLCV(pair, tf);
       if (candles.length === 0) return false;
 
-      const indicators = computeAll(candles);
-      const rsi = indicators.rsi;
+      const { rsi } = computeAll(candles);
 
       if (condition === 'rsi_above') return rsi > targetValue;
       if (condition === 'rsi_below') return rsi < targetValue;
     }
 
     if (condition.startsWith('ai_signal_')) {
-      const signal = await getSignal(alert.userId, pair, '1h');
+      const signal = await getSignal(alert.userId, pair, tf);
 
       if (condition === 'ai_signal_buy') {
         return signal.signal === 'BUY' && signal.confidence > targetValue;
@@ -63,11 +63,11 @@ async function evaluateAlert(alert: any): Promise<boolean> {
     }
 
     if (condition === 'pattern_detected') {
-      const candles = await getOHLCV(pair, '1h');
+      const candles = await getOHLCV(pair, tf);
       if (candles.length === 0) return false;
 
-      const indicators = computeAll(candles);
-      return indicators.patterns.includes(targetPattern);
+      const { patterns } = computeAll(candles);
+      return patterns.includes(targetPattern);
     }
 
     return false;

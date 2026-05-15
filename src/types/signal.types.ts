@@ -70,6 +70,8 @@ export interface SignalPayload {
   higherTfTrend:    string;   // 4H context
   dailyTrend:       string;   // Daily context
   tradingContext?:  string;
+  tradingStyle?:    'scalp' | 'swing';
+  keyLevels?:       string;   // Nearest support/resistance levels
 }
 
 export interface SignalResult {

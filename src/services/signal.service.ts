@@ -3,7 +3,7 @@
 import { Types } from 'mongoose';
 import Signal from '../models/Signal.model';
 import Trade from '../models/Trade.model';
-import { getOHLCV } from './chart.service';
+import { getOHLCV, getSupportResistance } from './chart.service';
 import { computeAll } from './indicator.service';
 import { getSentimentSummary } from './news.service';
 import { generateSignal } from './groq.service';
@@ -116,7 +116,8 @@ function buildTfSummary(tf: string, candles: any[], ind: any): string {
 export async function getSignal(
   userId: string,
   pair: string,
-  timeframe: string
+  timeframe: string,
+  tradingStyle: 'scalp' | 'swing' = 'swing',
 ): Promise<ISignal> {
 
   if (!VALID_PAIRS.includes(pair as ValidPair)) throw new Error(`Invalid pair: ${pair}`);
@@ -146,15 +147,36 @@ export async function getSignal(
   const lastCandle = candles[candles.length - 1];
   const sessionRating = getSessionRating(validPair, utcHour);
 
+  // ── Support / Resistance levels ───────────────────────────────────────────
+  let keyLevels = '';
+  try {
+    const srLevels = getSupportResistance(candles);
+    const price = lastCandle.close;
+    const nearest = srLevels
+      .sort((a, b) => Math.abs(a.price - price) - Math.abs(b.price - price))
+      .slice(0, 4);
+    keyLevels = nearest
+      .map(l => `${l.type.toUpperCase()} @ ${l.price.toFixed(5)} (strength ${l.strength})`)
+      .join(' | ');
+  } catch { /* non-fatal */ }
+
   // ── Pre-generation gate ───────────────────────────────────────────────────
-  // If we're in AVOID session AND ATR is below minimum → synthetic HOLD.
-  // No Groq call, no cost. The user should not be trading this pair right now.
+  // Swing: AVOID session + low ATR → synthetic HOLD (no point calling AI)
+  // Scalp: session gate is relaxed — only block on critically low ATR
   const atrTooLow = indicators.atr < MIN_ATR[validPair];
-  if (sessionRating === 'AVOID' && atrTooLow) {
+  if (tradingStyle !== 'scalp' && sessionRating === 'AVOID' && atrTooLow) {
     return _syntheticHold(
       userObjectId, validPair, validTf, lastCandle.close,
       sessionRating, indicators,
       `AVOID session for ${pair} + low volatility (ATR ${indicators.atr.toFixed(5)} below threshold). Wait for ${validPair === 'GBP/USD' || validPair === 'EUR/USD' ? 'London session (7am UTC)' : 'prime session window'}.`
+    );
+  }
+  // Scalp: still block if ATR is critically below half the minimum (no movement at all)
+  if (tradingStyle === 'scalp' && indicators.atr < MIN_ATR[validPair] * 0.5) {
+    return _syntheticHold(
+      userObjectId, validPair, validTf, lastCandle.close,
+      sessionRating, indicators,
+      `Scalp blocked: ATR ${indicators.atr.toFixed(5)} is critically low — market has no movement. Wait for volatility.`
     );
   }
 
@@ -255,6 +277,8 @@ export async function getSignal(
     sessionRating,
     higherTfTrend,
     dailyTrend,
+    tradingStyle,
+    keyLevels,
   });
 
   if (!result.signal || !['BUY', 'SELL', 'HOLD'].includes(result.signal)) {

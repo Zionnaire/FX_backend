@@ -17,6 +17,7 @@ interface AlertCreateBody {
   condition?: string;
   targetValue?: number;
   targetPattern?: string;
+  timeframe?: string;
   type?: string;
 }
 
@@ -25,6 +26,7 @@ interface AlertUpdateBody {
   condition?: string;
   targetValue?: number;
   targetPattern?: string;
+  timeframe?: string;
   type?: string;
   enabled?: boolean;
 }
@@ -38,6 +40,7 @@ function pickCreateFields(body: Record<string, unknown>): AlertCreateBody {
   if (typeof body.condition === 'string')     result.condition     = body.condition;
   if (typeof body.targetValue === 'number')   result.targetValue   = body.targetValue;
   if (typeof body.targetPattern === 'string') result.targetPattern = body.targetPattern;
+  if (typeof body.timeframe === 'string')     result.timeframe     = body.timeframe;
   if (typeof body.type === 'string')          result.type          = body.type;
 
   return result;
@@ -50,6 +53,7 @@ function pickUpdateFields(body: Record<string, unknown>): AlertUpdateBody {
   if (typeof body.condition === 'string')     result.condition     = body.condition;
   if (typeof body.targetValue === 'number')   result.targetValue   = body.targetValue;
   if (typeof body.targetPattern === 'string') result.targetPattern = body.targetPattern;
+  if (typeof body.timeframe === 'string')     result.timeframe     = body.timeframe;
   if (typeof body.type === 'string')          result.type          = body.type;
   if (typeof body.enabled === 'boolean')      result.enabled       = body.enabled;
 
