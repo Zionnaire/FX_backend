@@ -1,5 +1,5 @@
 import Alert from '../models/Alert.model';
-import { getSignal } from './signal.service';
+import Signal from '../models/Signal.model';
 import { getOHLCV } from './chart.service';
 import { computeAll } from './indicator.service';
 
@@ -52,13 +52,22 @@ async function evaluateAlert(alert: any): Promise<boolean> {
     }
 
     if (condition.startsWith('ai_signal_')) {
-      const signal = await getSignal(alert.userId, pair, tf);
+      // Use most recent cached signal from DB (avoids expensive Groq call on every check)
+      const TWO_HOURS = 2 * 60 * 60 * 1000;
+      const recent = await Signal.findOne({
+        userId:    alert.userId,
+        pair,
+        timeframe: tf,
+        createdAt: { $gte: new Date(Date.now() - TWO_HOURS) },
+      }).sort({ createdAt: -1 }).lean();
+
+      if (!recent) return false;
 
       if (condition === 'ai_signal_buy') {
-        return signal.signal === 'BUY' && signal.confidence > targetValue;
+        return recent.signal === 'BUY' && recent.confidence > (targetValue ?? 50);
       }
       if (condition === 'ai_signal_sell') {
-        return signal.signal === 'SELL' && signal.confidence > targetValue;
+        return recent.signal === 'SELL' && recent.confidence > (targetValue ?? 50);
       }
     }
 

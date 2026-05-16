@@ -148,6 +148,11 @@ function buildSignalPrompt(payload: SignalPayload): string {
     payload.rsi < 45 ? 'bearish range (<45)' : 'neutral (45–55)';
 
   const adxThreshold = isScalp ? 15 : 25;
+  const atrTrendCtx = payload.atrTrend === 'expanding'
+    ? 'EXPANDING (+15%) — volatility rising, wider SL needed, be cautious entering late'
+    : payload.atrTrend === 'contracting'
+    ? 'CONTRACTING (−15%) — volatility falling, momentum fading, favour HOLD or tight scalp'
+    : 'STABLE — normal volatility range';
   const adxContext = payload.adx >= adxThreshold
     ? `TRENDING (${payload.adx.toFixed(1)}) — directional trades valid`
     : `RANGING/WEAK (${payload.adx.toFixed(1)}) — ${isScalp ? 'momentum scalp only' : 'avoid trend-following entries'}`;
@@ -191,7 +196,8 @@ Session:         ${payload.session}
 Session Rating:  ${payload.sessionRating}  (PRIME=ideal, ACTIVE=tradeable, AVOID=low liquidity)
 Current Price:   ${price}
 ATR(14):         ${atr.toFixed(5)}  →  min SL=${minSL}  |  min TP=${minTP}
-
+ATR Trend:       ${atrTrendCtx}
+${payload.upcomingNews ? `\n⚠ HIGH-IMPACT NEWS IMMINENT: ${payload.upcomingNews}\n  → autoTradeRecommended MUST be false. Signal direction still valid but DO NOT auto-execute.\n` : ''}
 MULTI-TIMEFRAME BIAS:
   Daily:         ${payload.dailyTrend}
   ${payload.higherTfTrend}

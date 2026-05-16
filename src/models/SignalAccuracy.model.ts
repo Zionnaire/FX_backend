@@ -13,9 +13,10 @@ export interface ISignalAccuracy extends Document {
   confidence:      number;
   entryPrice:      number;
   checkPrice:      number;
-  pipMove:         number;    // actual pip movement in the predicted direction
-  wasCorrect:      boolean;   // price moved ≥1 pip in predicted direction
+  pipMove:         number;
+  wasCorrect:      boolean;
   outcome:         'tp_hit' | 'sl_hit' | 'moved_correct' | 'moved_wrong' | 'flat';
+  patterns:        string[];  // candlestick patterns active at signal time
   checkedAt:       Date;
 }
 
@@ -32,6 +33,7 @@ const schema = new Schema<ISignalAccuracy>(
     pipMove:         { type: Number, required: true },
     wasCorrect:      { type: Boolean, required: true },
     outcome:         { type: String, enum: ['tp_hit', 'sl_hit', 'moved_correct', 'moved_wrong', 'flat'] },
+    patterns:        { type: [String], default: [] },
     checkedAt:       { type: Date, default: Date.now },
   },
   { timestamps: true },

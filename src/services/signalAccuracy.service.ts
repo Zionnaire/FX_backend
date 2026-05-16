@@ -118,6 +118,7 @@ export async function evaluatePendingSignals(): Promise<void> {
         pipMove,
         wasCorrect,
         outcome,
+        patterns:        Array.isArray(sig.patterns) ? sig.patterns : [],
         checkedAt:       now,
       });
 
@@ -220,6 +221,17 @@ export async function getSignalAccuracyStats(userId: string) {
     tfMap.set(r.timeframe, entry);
   }
 
+  // Group by pattern — each signal may have multiple patterns
+  const patternMap = new Map<string, { total: number; correct: number }>();
+  for (const r of all) {
+    for (const p of (r.patterns ?? [])) {
+      const entry = patternMap.get(p) ?? { total: 0, correct: 0 };
+      entry.total++;
+      if (r.wasCorrect) entry.correct++;
+      patternMap.set(p, entry);
+    }
+  }
+
   return {
     total:   all.length,
     correct,
@@ -236,6 +248,15 @@ export async function getSignalAccuracyStats(userId: string) {
       correct:  v.correct,
       accuracy: Math.round((v.correct / v.total) * 100),
     })),
+    byPattern: Array.from(patternMap.entries())
+      .filter(([, v]) => v.total >= 2)
+      .sort((a, b) => b[1].total - a[1].total)
+      .map(([pattern, v]) => ({
+        pattern,
+        total:    v.total,
+        correct:  v.correct,
+        accuracy: Math.round((v.correct / v.total) * 100),
+      })),
     recentRecords: all.slice(0, 20).map((r) => ({
       pair:            r.pair,
       timeframe:       r.timeframe,
@@ -244,6 +265,7 @@ export async function getSignalAccuracyStats(userId: string) {
       wasCorrect:      r.wasCorrect,
       outcome:         r.outcome,
       pipMove:         r.pipMove,
+      patterns:        r.patterns ?? [],
       checkedAt:       r.checkedAt,
     })),
   };

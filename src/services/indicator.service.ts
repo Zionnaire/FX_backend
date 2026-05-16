@@ -69,7 +69,7 @@ export function detectPatterns(candles: IOHLCV[]): string[] {
   const patterns: string[] = [];
   const n = candles.length;
   const last3 = candles.slice(-3);
-  const [prev2, prev, curr] = last3;
+  const [, prev, curr] = last3;
 
   // ── Two-candle / single-candle patterns ──────────────────────────────────
 

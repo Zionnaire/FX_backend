@@ -5,11 +5,13 @@ import Signal from '../models/Signal.model';
 import Trade from '../models/Trade.model';
 import { getOHLCV, getSupportResistance } from './chart.service';
 import { computeAll } from './indicator.service';
+import { atr as calcAtr } from '../utils/indicators.utils';
 import { getSentimentSummary } from './news.service';
 import { generateSignal } from './groq.service';
 import { queryUserRules } from './rag.service';
 import { getAccuracyContext } from './signalAccuracy.service';
-import { ISignal, SessionRating } from '../types/signal.types';
+import { getUpcomingHighImpactEvents } from './economicCalendar.service';
+import { ISignal, SessionRating, SignalPayload } from '../types/signal.types';
 import { VALID_PAIRS, VALID_TIMEFRAMES, ValidPair, ValidTimeframe } from '../types/chart.types';
 
 // ─── Cache durations by timeframe ─────────────────────────────────────────────
@@ -160,6 +162,20 @@ export async function getSignal(
       .join(' | ');
   } catch { /* non-fatal */ }
 
+  // ── ATR rate-of-change (Demos & Goodhart: volatility trend as risk proxy) ─
+  // Compare current ATR to ATR from 5 candles ago to detect expanding/contracting volatility
+  let atrTrend: 'expanding' | 'contracting' | 'stable' = 'stable';
+  try {
+    if (candles.length >= 20) {
+      const prevAtr = calcAtr(candles.slice(0, -5));
+      if (prevAtr > 0) {
+        const pct = (indicators.atr - prevAtr) / prevAtr;
+        if (pct > 0.15)       atrTrend = 'expanding';
+        else if (pct < -0.15) atrTrend = 'contracting';
+      }
+    }
+  } catch { /* non-fatal */ }
+
   // ── Pre-generation gate ───────────────────────────────────────────────────
   // Swing: AVOID session + low ATR → synthetic HOLD (no point calling AI)
   // Scalp: session gate is relaxed — only block on critically low ATR
@@ -212,15 +228,21 @@ export async function getSignal(
   }
 
   // ── Parallel data fetches ─────────────────────────────────────────────────
-  const [newsSentiment, ragContext, accuracyCtx] = await Promise.allSettled([
+  const newsWindow = tradingStyle === 'scalp' ? 15 : 60;
+  const [newsSentiment, ragContext, accuracyCtx, calendarEvents] = await Promise.allSettled([
     getSentimentSummary(validPair),
     queryUserRules(userId, pair),
     getAccuracyContext(userId, pair, timeframe),
+    getUpcomingHighImpactEvents(validPair, newsWindow),
   ]);
 
-  const sentiment = newsSentiment.status === 'fulfilled' ? newsSentiment.value : 'Sentiment unavailable';
-  const context   = ragContext.status    === 'fulfilled' ? ragContext.value    : '';
-  const accuracy  = accuracyCtx.status  === 'fulfilled' ? accuracyCtx.value   : '';
+  const sentiment    = newsSentiment.status  === 'fulfilled' ? newsSentiment.value  : 'Sentiment unavailable';
+  const context      = ragContext.status     === 'fulfilled' ? ragContext.value     : '';
+  const accuracy     = accuracyCtx.status   === 'fulfilled' ? accuracyCtx.value    : '';
+  const upcomingEvts = calendarEvents.status === 'fulfilled' ? calendarEvents.value : [];
+  const upcomingNews = upcomingEvts.length > 0
+    ? upcomingEvts.map((e) => `${e.country} ${e.title} @ ${new Date(e.date).toUTCString()}`).join(' | ')
+    : '';
 
   // ── Personal edge context ─────────────────────────────────────────────────
   let tradingContext = '';
@@ -263,7 +285,7 @@ export async function getSignal(
     macd:            indicators.macd,
     ema20:           indicators.ema20,
     ema50:           indicators.ema50,
-    ema200:          indicators.ema200 ?? indicators.ema50, // fallback if ema200 not in computeAll
+    ema200:          indicators.ema200 ?? indicators.ema50,
     bb:              indicators.bb,
     stoch:           indicators.stoch,
     adx:             indicators.adx,
@@ -279,7 +301,20 @@ export async function getSignal(
     dailyTrend,
     tradingStyle,
     keyLevels,
+    atrTrend,
+    upcomingNews,
   });
+
+  // ── Post-generation news gate ─────────────────────────────────────────────
+  // Block auto-trade if high-impact news is within the window for this style
+  if (upcomingEvts.length > 0 && result.autoTradeRecommended) {
+    result.autoTradeRecommended = false;
+    const labels = upcomingEvts.map((e) => `${e.country} ${e.title}`).join(', ');
+    result.keyRisks = [
+      ...(result.keyRisks ?? []),
+      `High-impact news imminent (${newsWindow}min window): ${labels}`,
+    ];
+  }
 
   if (!result.signal || !['BUY', 'SELL', 'HOLD'].includes(result.signal)) {
     throw new Error('AI returned invalid signal value');

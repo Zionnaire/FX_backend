@@ -23,6 +23,7 @@ import newsRoutes from './routes/news.routes';
 import ragRoutes from './routes/rag.routes';
 import alertRoutes from './routes/alert.routes';
 import analyticsRoutes from './routes/analytics.routes';
+import calendarRoutes from './routes/calendar.routes';
 
 import { checkAlerts } from './services/alert.service';
 import { evaluatePendingSignals } from './services/signalAccuracy.service';
@@ -66,6 +67,7 @@ app.use('/api/news', newsRoutes);
 app.use('/api/rag', ragRoutes);
 app.use('/api/alerts', alertRoutes);
 app.use('/api/analytics', analyticsRoutes);
+app.use('/api/calendar', calendarRoutes);
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 

@@ -72,6 +72,8 @@ export interface SignalPayload {
   tradingContext?:  string;
   tradingStyle?:    'scalp' | 'swing';
   keyLevels?:       string;   // Nearest support/resistance levels
+  atrTrend?:        'expanding' | 'contracting' | 'stable';
+  upcomingNews?:    string;   // Upcoming high-impact events for this pair
 }
 
 export interface SignalResult {
