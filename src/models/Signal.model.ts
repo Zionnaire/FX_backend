@@ -48,12 +48,14 @@ const signalSchema = new Schema<ISignal>(
     pipsToTP:         { type: Number, min: 0 },
     invalidatesAt:    Date,
     htfBias:          String,
+    weeklyTrend:      String,
+    qualityTier:      { type: String, enum: ['A+', 'A', 'B', 'C'] },
   },
   { timestamps: true }
 );
 
-// TTL — kept 4 hours so history page can show today's signals
-signalSchema.index({ createdAt: 1 }, { expireAfterSeconds: 14_400 });
+// TTL — 48 hours keeps signals for the history page and accuracy evaluation window
+signalSchema.index({ createdAt: 1 }, { expireAfterSeconds: 172_800 });
 
 // Cache lookup index
 signalSchema.index({ userId: 1, pair: 1, timeframe: 1, createdAt: -1 });

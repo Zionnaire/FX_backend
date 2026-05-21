@@ -27,6 +27,7 @@ import calendarRoutes from './routes/calendar.routes';
 import mt5Routes from './routes/mt5.routes';
 
 import { checkAlerts } from './services/alert.service';
+import NewsCache from './models/NewsCache.model';
 import { evaluatePendingSignals } from './services/signalAccuracy.service';
 import { monitorOpenTrades } from './services/tradeMonitor.service';
 import { expireStaleExecutions } from './services/autoTrader.service';
@@ -144,6 +145,17 @@ process.on('uncaughtException', (error: Error) => {
 const bootstrap = async (): Promise<void> => {
   try {
     await connectDB();
+
+    // Clear all chart caches on startup — stale candle data causes charts to show
+    // the previous session's last candle instead of today's live price.
+    // With a 3-minute TTL per timeframe, the first request after startup always
+    // fetches fresh data from Twelve Data (or Yahoo as fallback).
+    try {
+      const cleared = await NewsCache.deleteMany({ key: /^chart:/ });
+      if (cleared.deletedCount > 0) {
+        console.log(`🗑  Cleared ${cleared.deletedCount} stale chart cache entries`);
+      }
+    } catch { /* non-fatal */ }
 
     const PORT = Number(env.port) || 5000;
 

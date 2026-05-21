@@ -33,6 +33,8 @@ export interface ISignal {
   pipsToTP?:              number;      // pip distance entry → TP
   invalidatesAt?:         Date;        // when this signal loses validity
   htfBias?:               string;      // "4H BEARISH | Daily BEARISH" summary
+  weeklyTrend?:           string;      // Weekly candle trend summary
+  qualityTier?:           'A+' | 'A' | 'B' | 'C';  // A+ = auto-trade, A/B = notify only
   createdAt?:             Date;
   updatedAt?:             Date;
 }
@@ -74,6 +76,7 @@ export interface SignalPayload {
   keyLevels?:       string;   // Nearest support/resistance levels
   atrTrend?:        'expanding' | 'contracting' | 'stable';
   upcomingNews?:    string;   // Upcoming high-impact events for this pair
+  weeklyTrend?:     string;   // Weekly trend summary
 }
 
 export interface SignalResult {

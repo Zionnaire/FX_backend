@@ -1,6 +1,6 @@
 // src/services/chart.service.ts
 
-import axios, { AxiosError } from 'axios';
+import axios from 'axios';
 import env from '../config/env';
 import NewsCache from '../models/NewsCache.model';
 import {
@@ -39,6 +39,18 @@ const YF_RANGE: Record<ValidTimeframe, string> = {
   '1h':  '1y',
   '4h':  '1y',
   '1d':  '2y',
+};
+
+// ─── Twelve Data interval map ─────────────────────────────────────────────────
+// Twelve Data has native forex + spot gold — better than Yahoo Finance for XAU/USD
+
+const TD_INTERVAL: Record<ValidTimeframe, string> = {
+  '1m':  '1min',
+  '5m':  '5min',
+  '15m': '15min',
+  '1h':  '1h',
+  '4h':  '4h',
+  '1d':  '1day',
 };
 
 // ─── Alpha Vantage interval map ───────────────────────────────────────────────
@@ -129,6 +141,55 @@ function aggregate4h(candles: IOHLCV[]): IOHLCV[] {
   return result;
 }
 
+// ─── Twelve Data fetcher (primary when key configured) ────────────────────────
+// Uses real spot forex / XAU/USD prices — more accurate than Yahoo GC=F futures
+
+async function fetchFromTwelveData(pair: ValidPair, timeframe: ValidTimeframe): Promise<IOHLCV[]> {
+  const key = env.twelveDataApiKey;
+  if (!key) throw new Error('Twelve Data key not configured');
+
+  const symbol   = pair;             // Twelve Data uses native XAU/USD, EUR/USD etc.
+  const interval = TD_INTERVAL[timeframe];
+
+  // Do NOT use encodeURIComponent — Twelve Data needs the literal slash in XAU/USD, EUR/USD etc.
+  // timezone=UTC forces all datetimes to UTC regardless of exchange (default is exchange-local,
+  // e.g. XAU/USD defaults to AEST UTC+10 which would make timestamps 10h ahead on the chart).
+  const url = `https://api.twelvedata.com/time_series?symbol=${symbol}&interval=${interval}&outputsize=100&timezone=UTC&apikey=${key}`;
+
+  const response = await axios.get(url, { timeout: 8_000 });
+  const data = response.data;
+
+  if (data.status === 'error') {
+    throw new Error(`Twelve Data error: ${data.message ?? JSON.stringify(data)}`);
+  }
+
+  // Log first value to confirm UTC timestamps look correct
+  if (Array.isArray(data.values) && data.values.length > 0) {
+    console.info(`[TwelveData] ${pair}/${timeframe} — latest candle: ${data.values[0].datetime} (newest-first)`);
+  }
+
+  if (!Array.isArray(data.values) || data.values.length === 0) {
+    throw new Error('Twelve Data returned empty values');
+  }
+
+  // Values are newest-first — reverse to oldest-first.
+  // Twelve Data returns "YYYY-MM-DD HH:MM:SS" without a timezone suffix.
+  // Appending 'T' + 'Z' forces V8 to parse it as UTC regardless of server locale.
+  const candles: IOHLCV[] = data.values
+    .map((v: Record<string, string>) => ({
+      time:   Math.floor(new Date(v.datetime.replace(' ', 'T') + 'Z').getTime() / 1000),
+      open:   parseFloat(v.open),
+      high:   parseFloat(v.high),
+      low:    parseFloat(v.low),
+      close:  parseFloat(v.close),
+      volume: parseFloat(v.volume ?? '0') || 0,
+    }))
+    .filter((c: IOHLCV) => !isNaN(c.open) && !isNaN(c.close) && c.close > 0)
+    .reverse();
+
+  return candles.slice(-100);
+}
+
 // ─── Alpha Vantage fetcher (fallback) ─────────────────────────────────────────
 
 async function fetchFromAlphaVantage(pair: ValidPair, timeframe: ValidTimeframe): Promise<IOHLCV[]> {
@@ -198,19 +259,47 @@ export async function getOHLCV(pair: string, timeframe: string): Promise<IOHLCV[
     return fresh.data as IOHLCV[];
   }
 
-  // ── Try Yahoo Finance (primary) ───────────────────────────────────────────
+  // ── Race Twelve Data vs Yahoo Finance (parallel — fastest wins) ──────────
+  // Sequential fallback caused 27s responses when TD timed out then YF also ran.
+  // Now both fire simultaneously; first valid result wins. TD has a short timeout
+  // so if it's slow, Yahoo wins the race without waiting the full 15s.
   let candles: IOHLCV[] = [];
   let source = '';
 
-  try {
-    candles = await fetchFromYahoo(validPair, validTimeframe);
-    source = 'Yahoo Finance';
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.warn(`[chart] Yahoo Finance failed for ${validPair}/${validTimeframe}: ${msg}`);
+  const fetches: Promise<{ candles: IOHLCV[]; src: string }>[] = [];
+
+  if (env.twelveDataApiKey) {
+    fetches.push(
+      fetchFromTwelveData(validPair, validTimeframe)
+        .then((c) => ({ candles: c, src: 'Twelve Data' }))
+        .catch((err) => {
+          console.warn(`[chart] Twelve Data failed for ${validPair}/${validTimeframe}: ${err instanceof Error ? err.message : String(err)}`);
+          return { candles: [] as IOHLCV[], src: '' };
+        })
+    );
   }
 
-  // ── Try Alpha Vantage (secondary) ─────────────────────────────────────────
+  fetches.push(
+    fetchFromYahoo(validPair, validTimeframe)
+      .then((c) => ({ candles: c, src: 'Yahoo Finance' }))
+      .catch((err) => {
+        console.warn(`[chart] Yahoo Finance failed for ${validPair}/${validTimeframe}: ${err instanceof Error ? err.message : String(err)}`);
+        return { candles: [] as IOHLCV[], src: '' };
+      })
+  );
+
+  // Wait for all and pick the first with data, preferring Twelve Data if both succeed
+  const results = await Promise.all(fetches);
+  const tdResult = results.find((r) => r.src === 'Twelve Data' && r.candles.length > 0);
+  const yfResult = results.find((r) => r.src === 'Yahoo Finance' && r.candles.length > 0);
+  const winner   = tdResult ?? yfResult;
+
+  if (winner) {
+    candles = winner.candles;
+    source  = winner.src;
+  }
+
+  // ── Alpha Vantage (last resort if both primary sources failed) ────────────
   if (candles.length === 0) {
     try {
       candles = await fetchFromAlphaVantage(validPair, validTimeframe);
@@ -245,6 +334,41 @@ export async function getOHLCV(pair: string, timeframe: string): Promise<IOHLCV[
   );
 
   return candles;
+}
+
+// ─── aggregateDailyToWeekly ───────────────────────────────────────────────────
+// Groups daily candles into ISO weeks (Mon–Fri). Used to compute weekly trend
+// without a separate API call — we already have daily candles in the signal flow.
+
+export function aggregateDailyToWeekly(dailyCandles: IOHLCV[]): IOHLCV[] {
+  const groups = new Map<string, IOHLCV[]>();
+
+  for (const c of dailyCandles) {
+    const d   = new Date(c.time * 1000);
+    const day = d.getUTCDay(); // 0=Sun,1=Mon,...,6=Sat
+    // Roll back to the Monday of this week
+    const monday = new Date(d);
+    monday.setUTCDate(d.getUTCDate() - (day === 0 ? 6 : day - 1));
+    monday.setUTCHours(0, 0, 0, 0);
+    const key = monday.toISOString().split('T')[0];
+    const group = groups.get(key) ?? [];
+    group.push(c);
+    groups.set(key, group);
+  }
+
+  const result: IOHLCV[] = [];
+  for (const [, candles] of [...groups.entries()].sort()) {
+    if (candles.length < 3) continue; // skip partial weeks (< 3 trading days)
+    result.push({
+      time:   candles[0].time,
+      open:   candles[0].open,
+      high:   Math.max(...candles.map((c) => c.high)),
+      low:    Math.min(...candles.map((c) => c.low)),
+      close:  candles[candles.length - 1].close,
+      volume: 0,
+    });
+  }
+  return result;
 }
 
 // ─── getSupportResistance ─────────────────────────────────────────────────────

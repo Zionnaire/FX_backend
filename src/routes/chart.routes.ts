@@ -7,6 +7,7 @@ import {
   getSupportResistanceController,
   getFibonacciController,
   getCurrentPriceController,
+  flushChartCacheController,
 } from "../controllers/chart.controller";
 
 const chartRouter = Router();
@@ -14,6 +15,7 @@ const chartRouter = Router();
 chartRouter.use(authMiddleware);
 
 chartRouter.get("/ohlcv/:pair", getOHLCVController);
+chartRouter.post("/cache/flush", flushChartCacheController);
 chartRouter.get("/price/:pair", getCurrentPriceController);
 chartRouter.get("/support/:pair", getSupportResistanceController);
 chartRouter.get("/fibonacci/:pair", getFibonacciController);

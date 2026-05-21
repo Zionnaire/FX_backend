@@ -85,11 +85,11 @@ export async function generateSignal(
   const confluenceScore = Math.min(8, Math.max(0, parsed.confluenceScore ?? 0));
   const isScalp = payload.tradingStyle === 'scalp';
 
-  // Safety gate: thresholds differ between scalp and swing
+  // Safety gate: raised thresholds — swing 75/7, scalp 70/6
   const autoTradeRecommended =
     signal !== "HOLD" &&
-    confidence >= (isScalp ? 65 : 72) &&
-    confluenceScore >= (isScalp ? 5 : 6) &&
+    confidence >= (isScalp ? 70 : 75) &&
+    confluenceScore >= (isScalp ? 6 : 7) &&
     parsed.autoTradeRecommended === true;
 
   return {
@@ -168,7 +168,10 @@ function buildSignalPrompt(payload: SignalPayload): string {
     payload.stoch.k < 20 ? `OVERSOLD (${payload.stoch.k.toFixed(1)})` :
                            `neutral (${payload.stoch.k.toFixed(1)})`;
 
-  const htfLabel = payload.higherTfTrend.split(':')[0]?.trim() || '4H';
+  const htfLabel   = payload.higherTfTrend.split(':')[0]?.trim() || '4H';
+  const weeklyLine = payload.weeklyTrend && !payload.weeklyTrend.includes('unavailable')
+    ? `  ${payload.weeklyTrend}`
+    : '  Weekly: data unavailable';
 
   // Scalp: tighter SL/TP scaled to quick moves; swing: ATR × 1.5 / × 3.75
   const minSL = isScalp ? (atr * 0.5).toFixed(5) : (atr * 1.5).toFixed(5);
@@ -198,7 +201,8 @@ Current Price:   ${price}
 ATR(14):         ${atr.toFixed(5)}  →  min SL=${minSL}  |  min TP=${minTP}
 ATR Trend:       ${atrTrendCtx}
 ${payload.upcomingNews ? `\n⚠ HIGH-IMPACT NEWS IMMINENT: ${payload.upcomingNews}\n  → autoTradeRecommended MUST be false. Signal direction still valid but DO NOT auto-execute.\n` : ''}
-MULTI-TIMEFRAME BIAS:
+MULTI-TIMEFRAME BIAS (macro → micro — ALL must agree for auto-trade):
+${weeklyLine}
   Daily:         ${payload.dailyTrend}
   ${payload.higherTfTrend}
 
@@ -219,7 +223,7 @@ TECHNICAL INDICATORS — ${payload.timeframe}
 ═══════════════════════════════════════════════════════
 CONFLUENCE CHECKLIST — score 1 point each (total → confluenceScore 0-8)
 ═══════════════════════════════════════════════════════
-  [1] Daily trend AGREES with proposed signal direction
+  [1] Weekly + Daily trend BOTH agree with proposed signal direction
   [2] ${htfLabel} trend AGREES with proposed signal direction
   [3] EMA20 and EMA50 both aligned with signal (price above both for BUY / below both for SELL)
   [4] RSI supports direction (>50 for BUY, <50 for SELL; NOT in opposing extreme)
@@ -279,16 +283,19 @@ ${isScalp ?
   R:R MUST be ≥ 1:2. If not achievable, output HOLD.`}
 
 ═══════════════════════════════════════════════════════
-AUTO-TRADE — set true only if ALL are true:
+AUTO-TRADE — QUALITY TIER A+ ONLY — set true only if ALL are true:
 ═══════════════════════════════════════════════════════
   1. signal = BUY or SELL
-  2. confidence ≥ ${isScalp ? 65 : 72}
-  3. confluenceScore ≥ ${isScalp ? 5 : 6}
+  2. confidence ≥ ${isScalp ? 70 : 75}  (raised threshold — only high-conviction setups)
+  3. confluenceScore ≥ ${isScalp ? 6 : 7}  (raised threshold — near-maximum confluence required)
   4. ADX ≥ ${adxThreshold}
-  5. ${isScalp ? 'Price near EMA20/EMA50 or clear BB level (structure entry)' : `Daily trend AND ${htfLabel} BOTH agree with signal direction`}
+  5. ${isScalp
+    ? 'Price near EMA20/EMA50 or clear BB level (structure entry)'
+    : `Weekly trend, Daily trend AND ${htfLabel} ALL agree with signal direction`}
   6. R:R ≥ ${minRR}
-  7. Session is ${isScalp ? 'PRIME, ACTIVE, or AVOID (scalpers can trade any session with sufficient ATR)' : 'PRIME or ACTIVE'}
-  8. No high-impact news within ${isScalp ? '15 minutes' : '1 hour'}
+  7. Session is ${isScalp ? 'PRIME or ACTIVE only' : 'PRIME or ACTIVE'}
+  8. No high-impact news within ${isScalp ? '30 minutes' : '2 hours'}
+  9. Signal does NOT oppose the Weekly trend under any circumstances
 
 ═══════════════════════════════════════════════════════
 OUTPUT — valid JSON only, no markdown, no extra text

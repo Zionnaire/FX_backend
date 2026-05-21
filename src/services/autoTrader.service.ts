@@ -10,6 +10,7 @@ import crypto from 'crypto';
 import User from '../models/User.model';
 import PendingExecution from '../models/PendingExecution.model';
 import Trade from '../models/Trade.model';
+import { getAutoTradeHealth } from './signalAccuracy.service';
 import { ISignal } from '../types/signal.types';
 import { ValidPair } from '../types/chart.types';
 
@@ -36,11 +37,35 @@ export async function triggerAutoTrade(signal: ISignal): Promise<void> {
     const user = await User.findById(signal.userId).lean();
     if (!user?.autoTrade?.enabled) return;
 
+    // ── Only A+ quality signals trigger auto-trade ─────────────────────────
+    if ((signal as any).qualityTier && (signal as any).qualityTier !== 'A+') {
+      console.log(`[AutoTrader] Skipped ${signal.pair} ${signal.signal} — quality tier ${(signal as any).qualityTier} (A+ required)`);
+      return;
+    }
+
     const settings = user.autoTrade;
 
     // ── Check if already queued for this signal ────────────────────────────
     const alreadyQueued = await PendingExecution.exists({ signalId: signal._id });
     if (alreadyQueued) return;
+
+    // ── Losing-streak circuit breaker ─────────────────────────────────────
+    const health = await getAutoTradeHealth(String(signal.userId));
+    if (health.suspended) {
+      console.log(`[AutoTrader] Suspended for user ${signal.userId}: ${health.reason}`);
+      return;
+    }
+
+    // ── Max 2 concurrent open auto-trades ────────────────────────────────
+    const openAutoTrades = await Trade.countDocuments({
+      userId: signal.userId,
+      status: 'open',
+      source: 'ai_auto',
+    });
+    if (openAutoTrades >= 2) {
+      console.log(`[AutoTrader] Max concurrent trades reached (${openAutoTrades}/2) for user ${signal.userId}`);
+      return;
+    }
 
     // ── Daily trade limit ──────────────────────────────────────────────────
     const todayStart = new Date();
@@ -77,7 +102,15 @@ export async function triggerAutoTrade(signal: ISignal): Promise<void> {
     const slPips    = signal.pipsToSL ?? Math.round(Math.abs(signal.entry - signal.stopLoss) / ps);
     const pipVal    = pipValuePerLot(signal.pair);
     const rawLots   = slPips > 0 ? riskUSD / (slPips * pipVal) : 0.01;
-    const lots      = Math.max(0.01, Math.floor(rawLots * 100) / 100);
+
+    // Hard cap: never more than 0.5 standard lots per trade, and never exceed 5% balance risk
+    const MAX_LOTS        = 0.5;
+    const maxLotsByRisk   = slPips > 0 ? (balance * 0.05) / (slPips * pipVal) : MAX_LOTS;
+    const lots = Math.max(0.01, Math.min(
+      Math.floor(rawLots * 100) / 100,
+      Math.floor(maxLotsByRisk * 100) / 100,
+      MAX_LOTS,
+    ));
 
     // ── Create pending execution ───────────────────────────────────────────
     const approvalExpiresAt = new Date(Date.now() + 60_000); // 60-second window

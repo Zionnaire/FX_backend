@@ -186,6 +186,44 @@ export async function getAccuracyContext(
   ].join('\n');
 }
 
+// ─── Auto-trade health check ──────────────────────────────────────────────────
+// Returns the rolling win rate of the last N directional signals.
+// If it drops below 45%, auto-trading is suspended to protect the account.
+
+export async function getAutoTradeHealth(userId: string): Promise<{
+  rolling20WinRate: number;
+  suspended:        boolean;
+  reason?:          string;
+}> {
+  const userObjId = new mongoose.Types.ObjectId(userId);
+
+  const recent = await SignalAccuracy.find({
+    userId:          userObjId,
+    predictedSignal: { $in: ['BUY', 'SELL'] }, // HOLDs are not directional bets
+  })
+    .sort({ checkedAt: -1 })
+    .limit(20)
+    .lean();
+
+  // Need at least 10 evaluated signals before enforcing the brake
+  if (recent.length < 10) {
+    return { rolling20WinRate: 100, suspended: false };
+  }
+
+  const wins    = recent.filter((r) => r.wasCorrect).length;
+  const winRate = Math.round((wins / recent.length) * 100);
+
+  if (winRate < 45) {
+    return {
+      rolling20WinRate: winRate,
+      suspended:        true,
+      reason: `Rolling ${recent.length}-signal win rate is ${winRate}% — below 45% safety threshold. Auto-trade suspended until accuracy recovers.`,
+    };
+  }
+
+  return { rolling20WinRate: winRate, suspended: false };
+}
+
 // ─── Accuracy stats for analytics endpoint ────────────────────────────────────
 
 export async function getSignalAccuracyStats(userId: string) {

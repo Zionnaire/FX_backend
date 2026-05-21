@@ -8,6 +8,7 @@ import {
   getSupportResistance,
   getFibonacciLevels,
 } from '../services/chart.service';
+import NewsCache from '../models/NewsCache.model';
 import { VALID_PAIRS, VALID_TIMEFRAMES } from '../types/chart.types';
 
 // ─── Shared validators ────────────────────────────────────────────────────────
@@ -100,6 +101,17 @@ export const getCurrentPriceController = asyncHandler(
       const message = error instanceof Error ? error.message : 'Failed to fetch price';
       sendError(res, message, message.includes('rate limit') ? 503 : 500);
     }
+  }
+);
+
+// ─── Cache flush ──────────────────────────────────────────────────────────────
+// Deletes all chart cache entries so the next request fetches fresh data.
+// Call this after adding/changing the data API key, or when charts look stale.
+
+export const flushChartCacheController = asyncHandler(
+  async (_req: Request, res: Response) => {
+    const result = await NewsCache.deleteMany({ key: /^chart:/ });
+    sendSuccess(res, { deleted: result.deletedCount, message: 'Chart cache cleared — next request will fetch fresh data' });
   }
 );
 

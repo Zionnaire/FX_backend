@@ -33,6 +33,7 @@ export default {
   jinaApiKey: process.env.JINA_API_KEY!,
   huggingfaceApiKey: process.env.HUGGINGFACE_API_KEY,
   alphaVantageApiKey: process.env.ALPHA_VANTAGE_API_KEY,
+  twelveDataApiKey:   process.env.TWELVE_DATA_API_KEY,
   newsApiKey: process.env.NEWS_API_KEY,
   cloudinaryCloudName: process.env.CLOUDINARY_CLOUD_NAME,
   cloudinaryApiKey: process.env.CLOUDINARY_API_KEY,
