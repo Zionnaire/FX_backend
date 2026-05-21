@@ -60,6 +60,16 @@ const userSchema = new Schema<IUserDocument>(
         max: 100,
       },
     },
+    autoTrade: {
+      enabled:         { type: Boolean,  default: false },
+      mt5ApiKey:       { type: String,   default: null  },
+      defaultRiskPct:  { type: Number,   default: 1, min: 0.1, max: 10 },
+      maxDailyLossPct: { type: Number,   default: 5, min: 1,   max: 50 },
+      maxDailyTrades:  { type: Number,   default: 3, min: 1,   max: 20 },
+      minConfluence:   { type: Number,   default: 5, min: 1,   max: 8  },
+      minConfidence:   { type: Number,   default: 65, min: 50, max: 100 },
+      eaLastPollAt:    { type: Date,     default: null },
+    },
   },
   {
     timestamps: true,

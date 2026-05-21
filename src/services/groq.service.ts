@@ -260,7 +260,8 @@ MANDATORY HOLD — output HOLD if ANY of these apply:
 ${isScalp ? `  ✗ ATR is too low to achieve minimum 5-pip profit target (no momentum)
   ✗ Price is not near a clear support/resistance level or EMA bounce point` :
 `  ✗ ADX < 20 AND no strong candlestick reversal pattern (choppy market)
-  ✗ Daily AND ${htfLabel} BOTH oppose the proposed signal direction
+  ✗ Daily trend OPPOSES the proposed signal direction (no counter-trend trades)
+  ✗ ${htfLabel} trend OPPOSES the proposed signal direction
   ✗ Session Rating is AVOID`}
 
 ═══════════════════════════════════════════════════════
@@ -284,7 +285,7 @@ AUTO-TRADE — set true only if ALL are true:
   2. confidence ≥ ${isScalp ? 65 : 72}
   3. confluenceScore ≥ ${isScalp ? 5 : 6}
   4. ADX ≥ ${adxThreshold}
-  5. ${isScalp ? 'Price near EMA20/EMA50 or clear BB level (structure entry)' : `Both Daily AND ${htfLabel} agree with signal`}
+  5. ${isScalp ? 'Price near EMA20/EMA50 or clear BB level (structure entry)' : `Daily trend AND ${htfLabel} BOTH agree with signal direction`}
   6. R:R ≥ ${minRR}
   7. Session is ${isScalp ? 'PRIME, ACTIVE, or AVOID (scalpers can trade any session with sufficient ATR)' : 'PRIME or ACTIVE'}
   8. No high-impact news within ${isScalp ? '15 minutes' : '1 hour'}

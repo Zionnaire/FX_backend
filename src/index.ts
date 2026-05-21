@@ -24,10 +24,12 @@ import ragRoutes from './routes/rag.routes';
 import alertRoutes from './routes/alert.routes';
 import analyticsRoutes from './routes/analytics.routes';
 import calendarRoutes from './routes/calendar.routes';
+import mt5Routes from './routes/mt5.routes';
 
 import { checkAlerts } from './services/alert.service';
 import { evaluatePendingSignals } from './services/signalAccuracy.service';
 import { monitorOpenTrades } from './services/tradeMonitor.service';
+import { expireStaleExecutions } from './services/autoTrader.service';
 
 // ─── App Setup ────────────────────────────────────────────────────────────────
 
@@ -68,6 +70,7 @@ app.use('/api/rag', ragRoutes);
 app.use('/api/alerts', alertRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/calendar', calendarRoutes);
+app.use('/api/mt5',      mt5Routes);
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 
@@ -91,20 +94,22 @@ app.use(errorHandler);
 
 // ─── Interval Handles (kept for graceful shutdown cleanup) ────────────────────
 
-let alertInterval:        ReturnType<typeof setInterval> | null = null;
-let accuracyInterval:     ReturnType<typeof setInterval> | null = null;
-let keepAliveInterval:    ReturnType<typeof setInterval> | null = null;
-let tradeMonitorInterval: ReturnType<typeof setInterval> | null = null;
+let alertInterval:          ReturnType<typeof setInterval> | null = null;
+let accuracyInterval:       ReturnType<typeof setInterval> | null = null;
+let keepAliveInterval:      ReturnType<typeof setInterval> | null = null;
+let tradeMonitorInterval:   ReturnType<typeof setInterval> | null = null;
+let executionExpiryInterval:ReturnType<typeof setInterval> | null = null;
 
 // ─── Graceful Shutdown ────────────────────────────────────────────────────────
 
 const shutdown = (signal: string) => {
   console.log(`\n${signal} received — shutting down gracefully`);
 
-  if (alertInterval)        clearInterval(alertInterval);
-  if (accuracyInterval)     clearInterval(accuracyInterval);
-  if (keepAliveInterval)    clearInterval(keepAliveInterval);
-  if (tradeMonitorInterval) clearInterval(tradeMonitorInterval);
+  if (alertInterval)           clearInterval(alertInterval);
+  if (accuracyInterval)        clearInterval(accuracyInterval);
+  if (keepAliveInterval)       clearInterval(keepAliveInterval);
+  if (tradeMonitorInterval)    clearInterval(tradeMonitorInterval);
+  if (executionExpiryInterval) clearInterval(executionExpiryInterval);
 
   // Give in-flight requests 10s to finish, then force close
   const forceExit = setTimeout(() => {
@@ -168,6 +173,11 @@ const bootstrap = async (): Promise<void> => {
         console.error('Alert check failed:', err);
       }
     }, env.alertCheckIntervalMs || 60_000);
+
+    // Execution expiry — marks PENDING_APPROVAL executions as EXPIRED after 60s window
+    executionExpiryInterval = setInterval(async () => {
+      try { await expireStaleExecutions(); } catch { /* silent */ }
+    }, 30_000);
 
     // Signal accuracy evaluator — runs every 30 minutes
     // Checks past signals whose timeHorizon has elapsed and records correctness

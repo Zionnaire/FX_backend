@@ -11,6 +11,7 @@ import { generateSignal } from './groq.service';
 import { queryUserRules } from './rag.service';
 import { getAccuracyContext } from './signalAccuracy.service';
 import { getUpcomingHighImpactEvents } from './economicCalendar.service';
+import { triggerAutoTrade } from './autoTrader.service';
 import { ISignal, SessionRating, SignalPayload } from '../types/signal.types';
 import { VALID_PAIRS, VALID_TIMEFRAMES, ValidPair, ValidTimeframe } from '../types/chart.types';
 
@@ -306,7 +307,6 @@ export async function getSignal(
   });
 
   // ── Post-generation news gate ─────────────────────────────────────────────
-  // Block auto-trade if high-impact news is within the window for this style
   if (upcomingEvts.length > 0 && result.autoTradeRecommended) {
     result.autoTradeRecommended = false;
     const labels = upcomingEvts.map((e) => `${e.country} ${e.title}`).join(', ');
@@ -314,6 +314,32 @@ export async function getSignal(
       ...(result.keyRisks ?? []),
       `High-impact news imminent (${newsWindow}min window): ${labels}`,
     ];
+  }
+
+  // ── Trend-alignment safety gate ───────────────────────────────────────────
+  // NEVER auto-trade counter to the daily trend — this is the single biggest
+  // cause of bot losses (e.g. SELL signals on a bull-running Gold).
+  // The AI occasionally fires SELL on short-term bearish indicators while the
+  // Daily chart is clearly BULLISH. This gate is the last line of defence.
+  if (result.signal !== 'HOLD' && result.autoTradeRecommended) {
+    const dailyBullish = dailyTrend.includes('BULLISH');
+    const dailyBearish = dailyTrend.includes('BEARISH');
+    const htfBullish   = higherTfTrend.includes('BULLISH');
+    const htfBearish   = higherTfTrend.includes('BEARISH');
+
+    const counterDailyBull = result.signal === 'SELL' && dailyBullish;
+    const counterDailyBear = result.signal === 'BUY'  && dailyBearish;
+
+    // Block if: signal fights daily trend, OR signal fights BOTH daily AND HTF
+    if (counterDailyBull || counterDailyBear ||
+        (result.signal === 'SELL' && htfBullish) ||
+        (result.signal === 'BUY'  && htfBearish)) {
+      result.autoTradeRecommended = false;
+      result.keyRisks = [
+        ...(result.keyRisks ?? []),
+        `Auto-trade blocked: ${result.signal} signal conflicts with ${dailyBullish || dailyBearish ? 'Daily' : 'HTF'} ${dailyBullish || htfBullish ? 'BULLISH' : 'BEARISH'} trend — no counter-trend auto-trades`,
+      ];
+    }
   }
 
   if (!result.signal || !['BUY', 'SELL', 'HOLD'].includes(result.signal)) {
@@ -352,6 +378,12 @@ export async function getSignal(
     invalidatesAt:        validUntil,
     htfBias:              htfBiasSummary,
   });
+
+  // ── Auto-trade trigger (non-blocking) ────────────────────────────────────
+  // Fire-and-forget: if user has autoTrade enabled and signal qualifies, queue execution
+  triggerAutoTrade(signal as unknown as ISignal).catch((e) =>
+    console.error('[signal.service] triggerAutoTrade error:', e)
+  );
 
   return signal;
 }
