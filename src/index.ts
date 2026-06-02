@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 dotenv.config();
 
 import express, { Application, Request, Response } from 'express';
+import { createServer } from 'http';
 import cors from 'cors';
 import helmet from 'helmet';
 import morgan from 'morgan';
@@ -14,24 +15,29 @@ import { connectDB } from './config/db';
 import env from './config/env';
 import {errorHandler}  from './middlewares/errorHandler';
 
-import authRoutes from './routes/auth.routes';
-import userRoutes from './routes/user.routes';
-import tradeRoutes from './routes/trade.routes';
-import signalRoutes from './routes/signal.routes';
-import chartRoutes from './routes/chart.routes';
-import newsRoutes from './routes/news.routes';
-import ragRoutes from './routes/rag.routes';
-import alertRoutes from './routes/alert.routes';
+import authRoutes     from './routes/auth.routes';
+import userRoutes     from './routes/user.routes';
+import tradeRoutes    from './routes/trade.routes';
+import signalRoutes   from './routes/signal.routes';
+import chartRoutes    from './routes/chart.routes';
+import newsRoutes     from './routes/news.routes';
+import ragRoutes      from './routes/rag.routes';
+import alertRoutes    from './routes/alert.routes';
 import analyticsRoutes from './routes/analytics.routes';
 import calendarRoutes from './routes/calendar.routes';
-import mt5Routes from './routes/mt5.routes';
+import mt5Routes      from './routes/mt5.routes';
 import telemetryRoutes from './routes/telemetry.routes';
+import propFirmRoutes from './routes/propfirm.routes';
+import scannerRoutes  from './routes/scanner.routes';
+import portfolioRoutes from './routes/portfolio.routes';
 
 import { checkAlerts } from './services/alert.service';
 import NewsCache from './models/NewsCache.model';
 import { evaluatePendingSignals } from './services/signalAccuracy.service';
 import { monitorOpenTrades } from './services/tradeMonitor.service';
 import { expireStaleExecutions } from './services/autoTrader.service';
+import { resetDailyHighBalances } from './services/propFirmTracker.service';
+import { initWebSocketServer } from './websocket/wsServer';
 
 // ─── App Setup ────────────────────────────────────────────────────────────────
 
@@ -62,18 +68,21 @@ app.use(morgan(env.nodeEnv === 'production' ? 'combined' : 'dev'));
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
 
-app.use('/api/auth', authRoutes);
-app.use('/api/user', userRoutes);
-app.use('/api/trades', tradeRoutes);
-app.use('/api/signal', signalRoutes);
-app.use('/api/chart', chartRoutes);
-app.use('/api/news', newsRoutes);
-app.use('/api/rag', ragRoutes);
-app.use('/api/alerts', alertRoutes);
+app.use('/api/auth',      authRoutes);
+app.use('/api/user',      userRoutes);
+app.use('/api/trades',    tradeRoutes);
+app.use('/api/signal',    signalRoutes);
+app.use('/api/chart',     chartRoutes);
+app.use('/api/news',      newsRoutes);
+app.use('/api/rag',       ragRoutes);
+app.use('/api/alerts',    alertRoutes);
 app.use('/api/analytics', analyticsRoutes);
-app.use('/api/calendar', calendarRoutes);
+app.use('/api/calendar',  calendarRoutes);
 app.use('/api/mt5',       mt5Routes);
 app.use('/api/telemetry', telemetryRoutes);
+app.use('/api/propfirm',  propFirmRoutes);
+app.use('/api/scanner',   scannerRoutes);
+app.use('/api/portfolio', portfolioRoutes);
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 
@@ -97,11 +106,12 @@ app.use(errorHandler);
 
 // ─── Interval Handles (kept for graceful shutdown cleanup) ────────────────────
 
-let alertInterval:          ReturnType<typeof setInterval> | null = null;
-let accuracyInterval:       ReturnType<typeof setInterval> | null = null;
-let keepAliveInterval:      ReturnType<typeof setInterval> | null = null;
-let tradeMonitorInterval:   ReturnType<typeof setInterval> | null = null;
-let executionExpiryInterval:ReturnType<typeof setInterval> | null = null;
+let alertInterval:           ReturnType<typeof setInterval> | null = null;
+let accuracyInterval:        ReturnType<typeof setInterval> | null = null;
+let keepAliveInterval:       ReturnType<typeof setInterval> | null = null;
+let tradeMonitorInterval:    ReturnType<typeof setInterval> | null = null;
+let executionExpiryInterval: ReturnType<typeof setInterval> | null = null;
+let dailyResetInterval:      ReturnType<typeof setInterval> | null = null;
 
 // ─── Graceful Shutdown ────────────────────────────────────────────────────────
 
@@ -113,6 +123,7 @@ const shutdown = (signal: string) => {
   if (keepAliveInterval)       clearInterval(keepAliveInterval);
   if (tradeMonitorInterval)    clearInterval(tradeMonitorInterval);
   if (executionExpiryInterval) clearInterval(executionExpiryInterval);
+  if (dailyResetInterval)      clearInterval(dailyResetInterval);
 
   // Give in-flight requests 10s to finish, then force close
   const forceExit = setTimeout(() => {
@@ -159,9 +170,13 @@ const bootstrap = async (): Promise<void> => {
       }
     } catch { /* non-fatal */ }
 
-    const PORT = Number(env.port) || 5000;
+    const PORT   = Number(env.port) || 5000;
+    const server = createServer(app);
 
-    app.listen(PORT, () => {
+    // Attach WebSocket server to the same HTTP server (path: /ws)
+    initWebSocketServer(server);
+
+    server.listen(PORT, () => {
       console.log(`✅ Server running on port ${PORT} [${env.nodeEnv}]`);
     });
 
@@ -192,6 +207,17 @@ const bootstrap = async (): Promise<void> => {
     executionExpiryInterval = setInterval(async () => {
       try { await expireStaleExecutions(); } catch { /* silent */ }
     }, 30_000);
+
+    // Prop firm daily reset — resets daily_high_balance to current_balance at midnight UTC.
+    // Runs every hour and only resets if the UTC date has advanced since last check.
+    let lastResetDate = new Date().toISOString().slice(0, 10);
+    dailyResetInterval = setInterval(async () => {
+      const today = new Date().toISOString().slice(0, 10);
+      if (today !== lastResetDate) {
+        lastResetDate = today;
+        try { await resetDailyHighBalances(); } catch { /* non-fatal */ }
+      }
+    }, 60 * 60 * 1000);
 
     // Signal accuracy evaluator — runs every 30 minutes
     // Checks past signals whose timeHorizon has elapsed and records correctness

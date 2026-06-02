@@ -11,6 +11,7 @@ import {
   getBySession,
 } from '../services/analytics.service';
 import { runBacktest } from '../services/backtest.service';
+import { runMonteCarlo } from '../services/monteCarlo.service';
 import { VALID_PAIRS as CHART_PAIRS, VALID_TIMEFRAMES as CHART_TFS } from '../types/chart.types';
 import type { ValidPair, ValidTimeframe } from '../types/chart.types';
 import { getSignalAccuracyStats } from '../services/signalAccuracy.service';
@@ -209,6 +210,26 @@ export const getCoachingController = asyncHandler(
     sendSuccess(res, {
       profile, insights, topSuggestion, cached: false, generatedAt: new Date(),
     });
+  }
+);
+
+// ─── Monte Carlo simulation ───────────────────────────────────────────────────
+// GET /api/analytics/montecarlo?days=90&iterations=1000&balance=10000
+
+export const runMonteCarloController = asyncHandler(
+  async (req: Request, res: Response) => {
+    const userId     = req.user!.id;
+    const days       = Math.min(365, Math.max(10, parseInt(req.query.days       as string, 10) || 90));
+    const iterations = Math.min(5000, Math.max(100, parseInt(req.query.iterations as string, 10) || 1000));
+    const balance    = Math.max(100, parseFloat(req.query.balance as string)   || 10000);
+
+    const result = await runMonteCarlo(userId, {
+      iterations,
+      lookback_days:   days,
+      initial_balance: balance,
+    });
+
+    sendSuccess(res, result);
   }
 );
 

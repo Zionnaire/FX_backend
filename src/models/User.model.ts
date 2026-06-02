@@ -70,24 +70,34 @@ const userSchema = new Schema<IUserDocument>(
       minConfidence:   { type: Number,   default: 65, min: 50, max: 100 },
       eaLastPollAt:    { type: Date,     default: null },
     },
+    // Telegram config — stored as Mixed to avoid extending IUser interface
+    telegram: { type: Schema.Types.Mixed, default: () => ({
+      chat_id: null, enabled: false,
+      on_signal: true, on_auto_trade: true, on_alert: true,
+      on_daily_briefing: true, on_circuit_breaker: true,
+    })},
   },
   {
     timestamps: true,
     toJSON: {
       transform: (_doc, ret) => {
-        delete ret.password;
-        delete ret.refreshToken;
-        return ret;
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const r = ret as any;
+        delete r.password;
+        delete r.refreshToken;
+        return r;
       },
     },
   }
 );
 
 userSchema.pre('save', async function (next) {
-  if (!this.isModified('password')) return next();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const doc = this as any;
+  if (!doc.isModified('password')) return next();
   try {
-    const salt = await bcryptjs.genSalt(12);
-    this.password = await bcryptjs.hash(this.password, salt);
+    const salt   = await bcryptjs.genSalt(12);
+    doc.password = await bcryptjs.hash(doc.password as string, salt);
     next();
   } catch (error) {
     next(error as Error);
@@ -97,7 +107,8 @@ userSchema.pre('save', async function (next) {
 userSchema.methods.comparePassword = async function (
   candidatePassword: string
 ): Promise<boolean> {
-  return bcryptjs.compare(candidatePassword, this.password);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return bcryptjs.compare(candidatePassword, (this as any).password as string);
 };
 
 export default mongoose.model<IUserDocument>('User', userSchema);

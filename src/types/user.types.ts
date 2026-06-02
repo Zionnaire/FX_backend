@@ -27,6 +27,15 @@ export interface IUser {
     riskPercent: number;
   };
   autoTrade?: IAutoTradeSettings;
+  telegram?: {
+    chat_id:             string | null;
+    enabled:             boolean;
+    on_signal:           boolean;
+    on_auto_trade:       boolean;
+    on_alert:            boolean;
+    on_daily_briefing:   boolean;
+    on_circuit_breaker:  boolean;
+  };
   createdAt?: Date;
   updatedAt?: Date;
 }

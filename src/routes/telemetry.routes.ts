@@ -11,6 +11,8 @@ import {
   getSetupClusters,
   getRegimeComparison,
   getRegimeWeightProfile,
+  exportTradesCSVHandler,
+  exportPerformanceHTMLHandler,
 } from '../controllers/telemetry.controller';
 
 const telemetryRouter = Router();
@@ -41,5 +43,11 @@ telemetryRouter.get('/regime-comparison', getRegimeComparison);
 
 // GET /api/telemetry/regime-weights                — online-learned regime weight profiles
 telemetryRouter.get('/regime-weights',    getRegimeWeightProfile);
+
+// GET /api/telemetry/export/trades.csv             — download all trades as CSV
+telemetryRouter.get('/export/trades.csv',         exportTradesCSVHandler);
+
+// GET /api/telemetry/export/performance.html       — print-ready HTML performance report
+telemetryRouter.get('/export/performance.html',   exportPerformanceHTMLHandler);
 
 export default telemetryRouter;

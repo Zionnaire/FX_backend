@@ -63,6 +63,15 @@ const tradeSchema = new Schema<ITrade>(
       enum:    ['manual', 'ai_auto'],
       default: 'manual',
     },
+    // ── Partial take-profit levels ────────────────────────────────────────
+    tp1:                 { type: Number,  default: null },
+    tp2:                 { type: Number,  default: null },
+    tp1_hit:             { type: Boolean, default: false },
+    tp2_hit:             { type: Boolean, default: false },
+    tp1_hit_at:          { type: Date,    default: null },
+    tp2_hit_at:          { type: Date,    default: null },
+    partial_close_pct:   { type: Number,  default: 50, min: 10, max: 90 },
+    breakeven_after_tp1: { type: Boolean, default: true },
     aiReview: {
       verdict: {
         type: String,

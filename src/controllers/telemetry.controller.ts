@@ -14,6 +14,7 @@ import {
 import { getAdaptiveWeights, computeAndCacheWeights } from '../services/adaptiveWeights.service';
 import { generateRegimeComparisonReport } from '../services/regimeComparison.service';
 import { getRegimeWeightDocument } from '../services/onlineLearning.service';
+import { exportTradesCSV, exportPerformanceHTML } from '../services/exportReport.service';
 
 const VALID_SESSIONS  = ['Asian', 'London Open', 'London-NY Overlap', 'New York'];
 const VALID_REGIMES   = ['trend', 'range', 'compression', 'expansion', 'news'];
@@ -208,5 +209,28 @@ export const getRegimeWeightProfile = asyncHandler(
       regime_counts:    counts,
       profiles:         Object.fromEntries(regimes.map((r) => [r, doc[r]])),
     });
+  }
+);
+
+// ─── Export: trades CSV ───────────────────────────────────────────────────────
+// GET /api/telemetry/export/trades.csv
+
+export const exportTradesCSVHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const csv = await exportTradesCSV(req.user!.id);
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Content-Disposition', 'attachment; filename="trades.csv"');
+    res.status(200).send(csv);
+  }
+);
+
+// ─── Export: performance HTML report ─────────────────────────────────────────
+// GET /api/telemetry/export/performance.html
+
+export const exportPerformanceHTMLHandler = asyncHandler(
+  async (req: Request, res: Response) => {
+    const html = await exportPerformanceHTML(req.user!.id);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.status(200).send(html);
   }
 );

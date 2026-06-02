@@ -13,6 +13,10 @@ import Trade from '../models/Trade.model';
 import { getAutoTradeHealth } from './signalAccuracy.service';
 import { ISignal } from '../types/signal.types';
 import { ValidPair } from '../types/chart.types';
+import { isTradeAllowed } from './propFirmTracker.service';
+import { computePartialTPLevels } from './partialTP.service';
+import { notifyTelegram, formatAutoTradeMessage, formatCircuitBreakerMessage } from './telegram.service';
+import { broadcast } from '../websocket/wsServer';
 
 // Pip size per pair (1 pip in price units)
 function pipSize(pair: string): number {
@@ -49,10 +53,23 @@ export async function triggerAutoTrade(signal: ISignal): Promise<void> {
     const alreadyQueued = await PendingExecution.exists({ signalId: signal._id });
     if (alreadyQueued) return;
 
+    // ── Prop firm challenge gate ───────────────────────────────────────────
+    const propFirmCheck = await isTradeAllowed(String(signal.userId));
+    if (!propFirmCheck.allowed) {
+      console.log(`[AutoTrader] Prop firm gate blocked: ${propFirmCheck.reason}`);
+      notifyTelegram(String(signal.userId), 'on_circuit_breaker',
+        formatCircuitBreakerMessage(`Prop firm rule: ${propFirmCheck.reason}`),
+      ).catch(() => {});
+      return;
+    }
+
     // ── Losing-streak circuit breaker ─────────────────────────────────────
     const health = await getAutoTradeHealth(String(signal.userId));
     if (health.suspended) {
       console.log(`[AutoTrader] Suspended for user ${signal.userId}: ${health.reason}`);
+      notifyTelegram(String(signal.userId), 'on_circuit_breaker',
+        formatCircuitBreakerMessage(health.reason ?? 'Losing streak circuit breaker'),
+      ).catch(() => {});
       return;
     }
 
@@ -124,8 +141,16 @@ export async function triggerAutoTrade(signal: ISignal): Promise<void> {
       MAX_LOTS,
     ));
 
+    // ── Partial TP levels ──────────────────────────────────────────────────
+    const partialLevels = computePartialTPLevels(
+      signal.signal as 'BUY' | 'SELL',
+      signal.entry,
+      signal.stopLoss,
+      signal.takeProfit,
+    );
+
     // ── Create pending execution ───────────────────────────────────────────
-    const approvalExpiresAt = new Date(Date.now() + 60_000); // 60-second window
+    const approvalExpiresAt = new Date(Date.now() + 60_000);
 
     await PendingExecution.create({
       userId:          signal.userId,
@@ -146,6 +171,25 @@ export async function triggerAutoTrade(signal: ISignal): Promise<void> {
       entryType:       signal.entryType  ?? 'MARKET',
       status:          'PENDING_APPROVAL',
       approvalExpiresAt,
+      tp1:             partialLevels.tp1,
+      tp2:             partialLevels.tp2,
+    });
+
+    // ── Notify via Telegram and WebSocket ──────────────────────────────────
+    notifyTelegram(String(signal.userId), 'on_auto_trade', formatAutoTradeMessage({
+      pair:      signal.pair,
+      direction: signal.signal,
+      lots,
+      entry:     signal.entry,
+    })).catch(() => {});
+
+    broadcast(String(signal.userId), 'autotrade:queued', {
+      pair:      signal.pair,
+      direction: signal.signal,
+      lots,
+      confidence: signal.confidence,
+      tp1:        partialLevels.tp1,
+      tp2:        partialLevels.tp2,
     });
 
     console.log(`[AutoTrader] Queued execution for ${signal.pair} ${signal.signal} — ${lots} lots`);

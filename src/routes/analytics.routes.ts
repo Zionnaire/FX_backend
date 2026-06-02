@@ -10,6 +10,7 @@ import {
   getSignalAccuracyController,
   getCoachingController,
   runBacktestController,
+  runMonteCarloController,
 } from "../controllers/analytics.controller";
 
 const analyticsRouter = Router();
@@ -22,6 +23,7 @@ analyticsRouter.get("/by-pair", getByPairController);
 analyticsRouter.get("/by-session", getBySessionController);
 analyticsRouter.get("/signal-accuracy", getSignalAccuracyController);
 analyticsRouter.get("/coaching", getCoachingController);
-analyticsRouter.get("/backtest", runBacktestController);
+analyticsRouter.get("/backtest",     runBacktestController);
+analyticsRouter.get("/montecarlo",   runMonteCarloController);
 
 export default analyticsRouter;
