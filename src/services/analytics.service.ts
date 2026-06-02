@@ -30,21 +30,28 @@ interface MonthlyPerformance {
 }
 
 interface AnalyticsResult {
-  winRate:           number;
-  totalPnl:          number;
-  totalTrades:       number;
-  wins:              number;
-  losses:            number;
-  openTrades:        number;
-  bestTrade:         number;
-  worstTrade:        number;
-  avgRR:             number;
-  maxDrawdown:       number;
-  sharpeRatio:       number;
-  profitFactor:      number;
-  avgTradeDuration:  string;
-  monthlyPerformance: MonthlyPerformance[];
-  byPair:            PairStat[];
+  winRate:              number;
+  totalPnl:             number;
+  totalTrades:          number;
+  wins:                 number;
+  losses:               number;
+  openTrades:           number;
+  bestTrade:            number;
+  worstTrade:           number;
+  avgWin:               number;   // average PnL of winning trades
+  avgLoss:              number;   // average PnL of losing trades (negative)
+  expectancy:           number;   // (winRate × avgWin) − (lossRate × avgLoss)
+  avgRR:                number;
+  maxDrawdown:          number;
+  sharpeRatio:          number;
+  profitFactor:         number;
+  avgTradeDuration:     string;
+  currentStreak:        number;
+  currentStreakType:    'win' | 'loss' | 'none';
+  longestWinStreak:     number;
+  longestLossStreak:    number;
+  monthlyPerformance:   MonthlyPerformance[];
+  byPair:               PairStat[];
 }
 
 interface PnlPoint {
@@ -155,8 +162,11 @@ export async function getStats(
     winRate: 0, totalPnl: 0, totalTrades: 0,
     wins: 0, losses: 0, openTrades: 0,
     bestTrade: 0, worstTrade: 0,
+    avgWin: 0, avgLoss: 0, expectancy: 0,
     avgRR: 0, maxDrawdown: 0, sharpeRatio: 0,
     profitFactor: 0, avgTradeDuration: '—',
+    currentStreak: 0, currentStreakType: 'none',
+    longestWinStreak: 0, longestLossStreak: 0,
     monthlyPerformance: [], byPair: [],
   };
 
@@ -165,6 +175,28 @@ export async function getStats(
   const wins      = trades.filter(t => t.status === 'win');
   const losses    = trades.filter(t => t.status === 'loss');
   const pnlValues = trades.map(t => t.pnl ?? 0);
+
+  // Streak computation (requires trades sorted oldest-first — already sorted by query default)
+  let curStreak = 0, longestWin = 0, longestLoss = 0;
+  let curStreakType: 'win' | 'loss' | 'none' = 'none';
+  for (const t of trades) {
+    if (t.status === 'win') {
+      if (curStreakType === 'win') { curStreak++; }
+      else { curStreak = 1; curStreakType = 'win'; }
+      longestWin = Math.max(longestWin, curStreak);
+    } else {
+      if (curStreakType === 'loss') { curStreak++; }
+      else { curStreak = 1; curStreakType = 'loss'; }
+      longestLoss = Math.max(longestLoss, curStreak);
+    }
+  }
+  // curStreak/curStreakType now reflect the most recent streak
+
+  const avgWin  = wins.length  > 0 ? parseFloat(mean(wins.map(t => t.pnl ?? 0)).toFixed(2))         : 0;
+  const avgLoss = losses.length > 0 ? parseFloat(mean(losses.map(t => t.pnl ?? 0)).toFixed(2))       : 0;
+  const lossRate = trades.length > 0 ? losses.length / trades.length : 0;
+  const winRateFrac = trades.length > 0 ? wins.length / trades.length : 0;
+  const expectancy  = parseFloat((winRateFrac * avgWin + lossRate * avgLoss).toFixed(2));
 
   const openQuery  = buildQuery(userId, filters, 'all');
   openQuery.status = 'open';
@@ -226,11 +258,18 @@ export async function getStats(
     openTrades,
     bestTrade:         parseFloat(bestTrade.toFixed(2)),
     worstTrade:        parseFloat(worstTrade.toFixed(2)),
+    avgWin,
+    avgLoss,
+    expectancy,
     avgRR,
     maxDrawdown,
     sharpeRatio,
     profitFactor,
     avgTradeDuration,
+    currentStreak:     curStreak,
+    currentStreakType: curStreakType,
+    longestWinStreak:  longestWin,
+    longestLossStreak: longestLoss,
     monthlyPerformance,
     byPair,
   };
@@ -300,4 +339,54 @@ export async function getByPair(
     bestTrade:   r.bestTrade  != null ? parseFloat(r.bestTrade.toFixed(2))  : null,
     worstTrade:  r.worstTrade != null ? parseFloat(r.worstTrade.toFixed(2)) : null,
   }));
+}
+
+// ─── getBySession ─────────────────────────────────────────────────────────────
+// Groups closed trades by market session based on createdAt UTC hour.
+
+function utcHourToSession(h: number): string {
+  if (h >= 22 || h < 7)  return 'Asian';
+  if (h >= 7  && h < 12) return 'London Open';
+  if (h >= 12 && h < 17) return 'London-NY Overlap';
+  return 'New York';
+}
+
+export async function getBySession(
+  userId: string,
+  filters: AnalyticsFilters = {}
+): Promise<{ session: string; wins: number; losses: number; totalTrades: number; winRate: number; netPnL: number }[]> {
+  const query = buildQuery(userId, filters, 'closed');
+
+  const trades = await Trade.find(query)
+    .select('status pnl createdAt')
+    .lean();
+
+  const map = new Map<string, { wins: number; losses: number; pnl: number }>();
+
+  for (const t of trades) {
+    const h       = t.createdAt ? new Date(t.createdAt).getUTCHours() : 12;
+    const session = utcHourToSession(h);
+    const entry   = map.get(session) ?? { wins: 0, losses: 0, pnl: 0 };
+    if (t.status === 'win')  entry.wins++;
+    else                     entry.losses++;
+    entry.pnl += t.pnl ?? 0;
+    map.set(session, entry);
+  }
+
+  return Array.from(map.entries())
+    .sort((a, b) => {
+      const order = ['London-NY Overlap', 'London Open', 'New York', 'Asian'];
+      return order.indexOf(a[0]) - order.indexOf(b[0]);
+    })
+    .map(([session, v]) => {
+      const total = v.wins + v.losses;
+      return {
+        session,
+        wins:        v.wins,
+        losses:      v.losses,
+        totalTrades: total,
+        winRate:     total > 0 ? parseFloat(((v.wins / total) * 100).toFixed(2)) : 0,
+        netPnL:      parseFloat(v.pnl.toFixed(2)),
+      };
+    });
 }

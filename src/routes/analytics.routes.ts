@@ -6,8 +6,10 @@ import {
   getStatsController,
   getPnlCurveController,
   getByPairController,
+  getBySessionController,
   getSignalAccuracyController,
   getCoachingController,
+  runBacktestController,
 } from "../controllers/analytics.controller";
 
 const analyticsRouter = Router();
@@ -17,7 +19,9 @@ analyticsRouter.use(authMiddleware);
 analyticsRouter.get("/stats", getStatsController);
 analyticsRouter.get("/pnl-curve", getPnlCurveController);
 analyticsRouter.get("/by-pair", getByPairController);
+analyticsRouter.get("/by-session", getBySessionController);
 analyticsRouter.get("/signal-accuracy", getSignalAccuracyController);
 analyticsRouter.get("/coaching", getCoachingController);
+analyticsRouter.get("/backtest", runBacktestController);
 
 export default analyticsRouter;

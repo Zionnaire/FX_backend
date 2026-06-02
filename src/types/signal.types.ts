@@ -73,10 +73,11 @@ export interface SignalPayload {
   dailyTrend:       string;   // Daily context
   tradingContext?:  string;
   tradingStyle?:    'scalp' | 'swing';
-  keyLevels?:       string;   // Nearest support/resistance levels
-  atrTrend?:        'expanding' | 'contracting' | 'stable';
-  upcomingNews?:    string;   // Upcoming high-impact events for this pair
-  weeklyTrend?:     string;   // Weekly trend summary
+  keyLevels?:        string;   // Nearest support/resistance levels
+  atrTrend?:         'expanding' | 'contracting' | 'stable';
+  upcomingNews?:     string;   // Upcoming high-impact events for this pair
+  weeklyTrend?:      string;   // Weekly trend summary
+  structureContext?: string;   // Market structure summary (BOS/CHOCH/OB/FVG)
 }
 
 export interface SignalResult {

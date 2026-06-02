@@ -8,7 +8,11 @@ import {
   getStats,
   getPnlCurve,
   getByPair,
+  getBySession,
 } from '../services/analytics.service';
+import { runBacktest } from '../services/backtest.service';
+import { VALID_PAIRS as CHART_PAIRS, VALID_TIMEFRAMES as CHART_TFS } from '../types/chart.types';
+import type { ValidPair, ValidTimeframe } from '../types/chart.types';
 import { getSignalAccuracyStats } from '../services/signalAccuracy.service';
 import { buildTradingProfile } from '../services/trading-profile.service';
 import { generateCoachingInsights } from '../services/groq.service';
@@ -108,6 +112,37 @@ export const getByPairController = asyncHandler(
 
     const byPair = await getByPair(userId, filters);
     sendSuccess(res, byPair);
+  }
+);
+
+// ─── By Session Breakdown ─────────────────────────────────────────────────────
+
+export const getBySessionController = asyncHandler(
+  async (req: Request, res: Response) => {
+    const filters = parseFilters(req.query as Record<string, unknown>);
+    if (filters === null) { sendBadRequest(res, 'Invalid query parameters.'); return; }
+    const data = await getBySession(req.user!.id, filters);
+    sendSuccess(res, data);
+  }
+);
+
+// ─── Backtest ─────────────────────────────────────────────────────────────────
+
+export const runBacktestController = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { pair, timeframe, style } = req.query as Record<string, string>;
+
+    if (!pair || !CHART_PAIRS.includes(pair as ValidPair)) {
+      sendBadRequest(res, `Invalid pair. Must be one of: ${CHART_PAIRS.join(', ')}`);
+      return;
+    }
+    if (!timeframe || !CHART_TFS.includes(timeframe as ValidTimeframe)) {
+      sendBadRequest(res, `Invalid timeframe. Must be one of: ${CHART_TFS.join(', ')}`);
+      return;
+    }
+    const tradingStyle = style === 'scalp' ? 'scalp' : 'swing';
+    const result = await runBacktest(pair as ValidPair, timeframe as ValidTimeframe, tradingStyle);
+    sendSuccess(res, result);
   }
 );
 

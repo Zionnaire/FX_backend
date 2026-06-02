@@ -31,7 +31,8 @@
     "mongoose": "^7.8.9",
     "morgan": "^1.10.1",
     "multer": "^2.0.2",
-    "pdf-parse": "^1.1.4"
+    "pdf-parse": "^1.1.4",
+    "uuid": "^14.0.0"
   },
   "devDependencies": {
     "@types/bcryptjs": "^2.4.6",
@@ -43,6 +44,7 @@
     "@types/multer": "^2.1.0",
     "@types/node": "^20.19.39",
     "@types/pdf-parse": "^1.1.5",
+    "@types/uuid": "^10.0.0",
     "nodemon": "^3.1.14",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"

@@ -7,13 +7,19 @@ import { getOHLCV, getSupportResistance, aggregateDailyToWeekly } from './chart.
 import { computeAll, Indicators } from './indicator.service';
 import { atr as calcAtr } from '../utils/indicators.utils';
 import { getSentimentSummary } from './news.service';
-import { generateSignal } from './groq.service';
+import { explainSignal } from './groq.service';
 import { queryUserRules } from './rag.service';
 import { getAccuracyContext } from './signalAccuracy.service';
 import { getUpcomingHighImpactEvents } from './economicCalendar.service';
 import { triggerAutoTrade } from './autoTrader.service';
 import { IOHLCV } from '../types/chart.types';
-import { ISignal, SessionRating, SignalPayload } from '../types/signal.types';
+import { ISignal, SessionRating } from '../types/signal.types';
+import { analyzeMarketStructure } from './structure.service';
+import { runStrategy, extractBias, TradingBias } from './strategy.service';
+import { evaluateScalpExecution } from './scalp-execution.service';
+import { logTradeEvent, utcHourToSession, detectMarketRegime, scoreOBQuality, scoreFVGQuality, scoreDisplacement } from './tradeEvent.service';
+import { getAdaptiveWeights, getRegimeWeights } from './adaptiveWeights.service';
+import { getLearnedBiasAdjustment, computeDynamicConfidence, blendConfidence } from './dynamicConfidence.service';
 import { VALID_PAIRS, VALID_TIMEFRAMES, ValidPair, ValidTimeframe } from '../types/chart.types';
 
 // ─── Cache durations by timeframe ─────────────────────────────────────────────
@@ -41,6 +47,18 @@ const HIGHER_TF: Record<ValidTimeframe, ValidTimeframe> = {
   '1m':  '15m',
   '5m':  '1h',
   '15m': '1h',
+  '1h':  '4h',
+  '4h':  '1d',
+  '1d':  '1d',
+};
+
+// ─── Scalp macro bias timeframes ──────────────────────────────────────────────
+// For scalp mode, bias is read from 1H (for 1m/5m execution) or 4H (for 15m/1h
+// execution) — higher than the execution TF but lower than swing HTF.
+const SCALP_BIAS_TF: Record<ValidTimeframe, ValidTimeframe> = {
+  '1m':  '1h',
+  '5m':  '1h',
+  '15m': '4h',
   '1h':  '4h',
   '4h':  '1d',
   '1d':  '1d',
@@ -228,27 +246,11 @@ export async function getSignal(
     }
   } catch { /* non-fatal */ }
 
-  // ── Pre-generation gate ───────────────────────────────────────────────────
-  const atrTooLow = indicators.atr < MIN_ATR[validPair];
-  if (tradingStyle !== 'scalp' && sessionRating === 'AVOID' && atrTooLow) {
-    return _syntheticHold(
-      userObjectId, validPair, validTf, lastCandle.close, sessionRating, indicators,
-      `AVOID session for ${pair} + low volatility (ATR ${indicators.atr.toFixed(5)} below threshold). Wait for prime session.`
-    );
-  }
+  // ── Hard ATR gate (data quality — before anything else) ──────────────────
   if (tradingStyle === 'scalp' && indicators.atr < MIN_ATR[validPair] * 0.5) {
     return _syntheticHold(
       userObjectId, validPair, validTf, lastCandle.close, sessionRating, indicators,
-      `Scalp blocked: ATR ${indicators.atr.toFixed(5)} is critically low — no movement. Wait for volatility.`
-    );
-  }
-
-  // ── Pre-Groq rule engine — dead market check ──────────────────────────────
-  // If ADX is rock-bottom AND indicators are perfectly conflicted, no Groq call needed
-  if (indicators.adx < 8 && tradingStyle === 'swing') {
-    return _syntheticHold(
-      userObjectId, validPair, validTf, lastCandle.close, sessionRating, indicators,
-      `Market dead: ADX ${indicators.adx.toFixed(1)} — no directional momentum. No swing trade possible.`
+      `Scalp blocked: ATR ${indicators.atr.toFixed(5)} is critically low. Wait for volatility.`
     );
   }
 
@@ -258,8 +260,6 @@ export async function getSignal(
   let dailyTrend    = 'Daily data unavailable';
   let weeklyTrend   = 'Weekly data unavailable';
   let htfBiasSummary = '';
-
-  // Track directional alignment for quality tier
   let dailyAligned  = false;
   let weeklyAligned = false;
 
@@ -271,14 +271,12 @@ export async function getSignal(
         higherTfTrend = buildTfSummary(htf, htfCandles, htfInd);
       }
     }
-
     if (validTf !== '1d') {
       const dailyCandles = await getOHLCV(validPair, '1d');
       if (dailyCandles.length > 0) {
         const dailyInd = computeAll(dailyCandles);
         dailyTrend     = buildTfSummary('Daily', dailyCandles, dailyInd);
 
-        // ── Weekly trend (aggregated from daily candles) ─────────────────
         const weeklyCandles = aggregateDailyToWeekly(dailyCandles);
         if (weeklyCandles.length >= 3) {
           const wInd    = computeAll(weeklyCandles);
@@ -286,30 +284,60 @@ export async function getSignal(
           const wEma200 = wInd.ema200 ?? wInd.ema50;
           const wDir    = lastW.close > wEma200 ? 'BULLISH' : lastW.close < wEma200 ? 'BEARISH' : 'NEUTRAL';
           const wMacd   = wInd.macd.histogram > 0 ? 'bullish' : 'bearish';
-          weeklyTrend = `Weekly: ${wDir} | RSI=${wInd.rsi.toFixed(1)} | MACD=${wMacd} | ADX=${wInd.adx.toFixed(1)}`;
+          weeklyTrend   = `Weekly: ${wDir} | RSI=${wInd.rsi.toFixed(1)} | MACD=${wMacd} | ADX=${wInd.adx.toFixed(1)}`;
         }
       }
     }
-
     htfBiasSummary = [weeklyTrend, dailyTrend, higherTfTrend]
       .filter((s) => !s.includes('unavailable'))
       .join(' | ');
-  } catch { /* non-fatal — signal still generated with partial context */ }
+  } catch { /* non-fatal */ }
+
+  // ── Scalp macro bias (1H/4H — fetched separately from swing HTF) ────────────
+  // Used only in scalp mode. Gives the strategy engine a mid-timeframe directional
+  // context without letting daily/weekly bias block counter-trend scalp setups.
+  let scalpMacroBias: TradingBias | undefined;
+  if (tradingStyle === 'scalp') {
+    try {
+      const scalp_btf         = SCALP_BIAS_TF[validTf];
+      const scalp_btf_candles = await getOHLCV(validPair, scalp_btf);
+      if (scalp_btf_candles.length > 0) {
+        const scalp_btf_ind = computeAll(scalp_btf_candles);
+        scalpMacroBias = extractBias(buildTfSummary(scalp_btf, scalp_btf_candles, scalp_btf_ind));
+      }
+      console.info(`[SCALP] Macro bias TF=${scalp_btf}: ${scalpMacroBias ?? 'neutral'}`);
+    } catch { /* non-fatal */ }
+  }
+
+  // ── Market structure analysis ─────────────────────────────────────────────
+  let structureContext = '';
+  let structureObj = analyzeMarketStructure(candles);
+  try { structureContext = structureObj.summary; } catch { /* non-fatal */ }
+
+  // ── Pre-fetch regime detection ────────────────────────────────────────────
+  // Detect regime from current indicators (without hasNews — corrected post-fetch).
+  // Used to fetch the regime-specific weight profile in the parallel block below.
+  const preliminaryRegime = detectMarketRegime(indicators, structureObj, atrTrend, false);
 
   // ── Parallel data fetches ─────────────────────────────────────────────────
-  // Extended news window: 2 hours for swing (was 60min), 30 min for scalp
   const newsWindow = tradingStyle === 'scalp' ? 30 : 120;
-  const [newsSentiment, ragContext, accuracyCtx, calendarEvents] = await Promise.allSettled([
+  const [newsSentiment, ragContext, accuracyCtx, calendarEvents, adaptiveWeightResult, regimeWeightResult] = await Promise.allSettled([
     getSentimentSummary(validPair),
     queryUserRules(userId, pair),
     getAccuracyContext(userId, pair, timeframe),
     getUpcomingHighImpactEvents(validPair, newsWindow),
+    getAdaptiveWeights(userId),
+    getRegimeWeights(userId, preliminaryRegime),
   ]);
 
-  const sentiment    = newsSentiment.status  === 'fulfilled' ? newsSentiment.value  : 'Sentiment unavailable';
-  const context      = ragContext.status     === 'fulfilled' ? ragContext.value     : '';
-  const accuracy     = accuracyCtx.status   === 'fulfilled' ? accuracyCtx.value    : '';
-  const upcomingEvts = calendarEvents.status === 'fulfilled' ? calendarEvents.value : [];
+  const sentiment      = newsSentiment.status === 'fulfilled'  ? newsSentiment.value  : 'Sentiment unavailable';
+  const context        = ragContext.status    === 'fulfilled'  ? ragContext.value     : '';
+  const accuracy       = accuracyCtx.status  === 'fulfilled'  ? accuracyCtx.value    : '';
+  const upcomingEvts   = calendarEvents.status === 'fulfilled' ? calendarEvents.value : [];
+  const weightProfile  = adaptiveWeightResult.status === 'fulfilled' ? adaptiveWeightResult.value : null;
+  // Regime profile takes priority; falls back to global profile if no regime data yet
+  const regimeProfile  = regimeWeightResult.status === 'fulfilled' ? regimeWeightResult.value : null;
+  const activeProfile  = regimeProfile ?? weightProfile;
   const upcomingNews = upcomingEvts.length > 0
     ? upcomingEvts.map((e) => `${e.country} ${e.title} @ ${new Date(e.date).toUTCString()}`).join(' | ')
     : '';
@@ -330,42 +358,96 @@ export async function getSignal(
     if (pairStat && pairStat.total >= 5) {
       const wr    = ((pairStat.wins / pairStat.total) * 100).toFixed(0);
       const sells = pairStat.total - pairStat.buys;
-      const buyWr = pairStat.buys > 0
-        ? `BUY ${((pairStat.buyWins / pairStat.buys) * 100).toFixed(0)}%`
-        : '';
-      const sellWins = pairStat.wins - pairStat.buyWins;
-      const sellWr   = sells > 0
-        ? `SELL ${((sellWins / sells) * 100).toFixed(0)}%`
-        : '';
+      const buyWr = pairStat.buys > 0 ? `BUY ${((pairStat.buyWins / pairStat.buys) * 100).toFixed(0)}%` : '';
+      const sellWr = sells > 0 ? `SELL ${(((pairStat.wins - pairStat.buyWins) / sells) * 100).toFixed(0)}%` : '';
       const guidance = pairStat.wins / pairStat.total >= 0.60
         ? 'Proven edge — A+ setups can be traded with full confidence.'
         : pairStat.wins / pairStat.total >= 0.50
-        ? 'Moderate edge — A+ setups only, standard size.'
-        : 'Below 50% win rate — apply strictest criteria or skip.';
+        ? 'Moderate edge — A+ setups only.'
+        : 'Below 50% win rate — strictest criteria only.';
       tradingContext = `${pairStat.total} closed trades on ${pair}: ${wr}% win rate (${[buyWr, sellWr].filter(Boolean).join(' / ')}). ${guidance}`;
     }
   } catch { /* non-fatal */ }
 
-  // ── Call Groq AI ──────────────────────────────────────────────────────────
-  const result = await generateSignal({
-    pair:            validPair,
-    timeframe:       validTf,
-    price:           lastCandle.close,
-    rsi:             indicators.rsi,
-    macd:            indicators.macd,
-    ema20:           indicators.ema20,
-    ema50:           indicators.ema50,
-    ema200:          indicators.ema200 ?? indicators.ema50,
-    bb:              indicators.bb,
-    stoch:           indicators.stoch,
-    adx:             indicators.adx,
-    atr:             indicators.atr,
-    patterns:        indicators.patterns,
-    newsSentiment:   sentiment,
-    ragContext:      context,
-    accuracyContext: accuracy,
+  // ── DETERMINISTIC RULE ENGINE (decides direction — no AI involved) ────────
+  const htfBiasDir    = extractBias(higherTfTrend);
+  const dailyBiasDir  = extractBias(dailyTrend);
+  const weeklyBiasDir = extractBias(weeklyTrend);
+
+  const strategyDecision = runStrategy(
+    candles, indicators, structureObj, sessionRating,
+    htfBiasDir, dailyBiasDir, weeklyBiasDir,
+    validPair, tradingStyle, atrTrend,
+    scalpMacroBias,
+  );
+
+  // Strategy said HOLD → return immediately without calling Groq
+  if (strategyDecision.signal === 'HOLD') {
+    const holdReason = [
+      ...strategyDecision.blockers,
+      ...strategyDecision.reasons,
+    ].join('. ') || 'No high-quality setup detected by the rule engine.';
+    return _syntheticHold(
+      userObjectId, validPair, validTf, lastCandle.close, sessionRating, indicators,
+      holdReason,
+    );
+  }
+
+  // ── Scalp execution trigger validation ──────────────────────────────────
+  // For scalp mode: validate that a candle-close-confirmed execution trigger
+  // exists before routing to Groq. Enforces spread gate, cooldown, news lockout,
+  // and anti-repaint rules. Swing mode skips this layer entirely.
+  let execTriggerTypes: string[] = [];
+
+  if (tradingStyle === 'scalp') {
+    const execResult = await evaluateScalpExecution({
+      candles,
+      indicators,
+      structure:      structureObj,
+      signal:         strategyDecision.signal,
+      pair:           validPair,
+      userId,
+      upcomingEvents: upcomingEvts,
+      // currentSpread: not available from OHLCV; inject from broker tick feed when integrated
+    });
+
+    if (!execResult.canExecute) {
+      return _syntheticHold(
+        userObjectId, validPair, validTf, lastCandle.close, sessionRating, indicators,
+        execResult.executionReason,
+      );
+    }
+
+    execTriggerTypes = [execResult.trigger.type];
+
+    // Enrich strategy decision with execution trigger context for Groq prompt
+    strategyDecision.reasons.push(...execResult.trigger.reasons);
+    strategyDecision.reasons.push(
+      `Execution trigger: ${execResult.trigger.type} (quality=${execResult.trigger.quality}/100)`,
+      `Retest score: ${execResult.retestScore.total}/100 (rejection=${execResult.retestScore.rejectionStrength}, depth=${execResult.retestScore.retracementDepth}, mitigation=${execResult.retestScore.mitigationQuality}, FVG=${execResult.retestScore.imbalanceRespect})`,
+    );
+  }
+
+  // ── AI EXPLAINS the decided direction and computes entry/SL/TP ──────────
+  const result = await explainSignal({
+    pair:             validPair,
+    timeframe:        validTf,
+    price:            lastCandle.close,
+    rsi:              indicators.rsi,
+    macd:             indicators.macd,
+    ema20:            indicators.ema20,
+    ema50:            indicators.ema50,
+    ema200:           indicators.ema200 ?? indicators.ema50,
+    bb:               indicators.bb,
+    stoch:            indicators.stoch,
+    adx:              indicators.adx,
+    atr:              indicators.atr,
+    patterns:         indicators.patterns,
+    newsSentiment:    sentiment,
+    ragContext:       context,
+    accuracyContext:  accuracy,
     tradingContext,
-    session:         getSessionDescription(utcHour),
+    session:          getSessionDescription(utcHour),
     sessionRating,
     higherTfTrend,
     dailyTrend,
@@ -374,9 +456,16 @@ export async function getSignal(
     keyLevels,
     atrTrend,
     upcomingNews,
+    structureContext,
+    // Strategy-engine decision passed explicitly
+    decidedSignal:    strategyDecision.signal,
+    strategyReasons:  strategyDecision.reasons,
+    strategyBlockers: strategyDecision.blockers,
+    suggestedSL:      strategyDecision.suggestedSL,
+    suggestedTP:      strategyDecision.suggestedTP,
   });
 
-  // ── Post-Groq hard news gate ──────────────────────────────────────────────
+  // ── Post-explain hard news gate ──────────────────────────────────────────
   if (upcomingEvts.length > 0 && result.autoTradeRecommended) {
     result.autoTradeRecommended = false;
     const labels = upcomingEvts.map((e) => `${e.country} ${e.title}`).join(', ');
@@ -386,70 +475,55 @@ export async function getSignal(
     ];
   }
 
-  // ── Post-Groq trend alignment gate ───────────────────────────────────────
-  // Block auto-trade if signal opposes the daily OR weekly trend.
-  // The weekly gate is the hardest: never auto-trade against the weekly candle.
-  if (result.signal !== 'HOLD' && result.autoTradeRecommended) {
-    const dailyBullish  = dailyTrend.includes('BULLISH');
-    const dailyBearish  = dailyTrend.includes('BEARISH');
-    const weeklyBullish = weeklyTrend.includes('BULLISH');
-    const weeklyBearish = weeklyTrend.includes('BEARISH');
-    const htfBullish    = higherTfTrend.includes('BULLISH');
-    const htfBearish    = higherTfTrend.includes('BEARISH');
+  // ── Bias alignment flags ──────────────────────────────────────────────────
+  // Used for: (1) quality tier, (2) confidence adjustment, (3) telemetry logging.
+  // Bias no longer blocks trades — it adjusts confidence score only.
+  if (result.signal !== 'HOLD') {
+    dailyAligned  = !(
+      (result.signal === 'SELL' && dailyBiasDir  === 'bullish') ||
+      (result.signal === 'BUY'  && dailyBiasDir  === 'bearish')
+    );
+    weeklyAligned = !(
+      (result.signal === 'SELL' && weeklyBiasDir === 'bullish') ||
+      (result.signal === 'BUY'  && weeklyBiasDir === 'bearish')
+    );
 
-    const counterDaily  = (result.signal === 'SELL' && dailyBullish) || (result.signal === 'BUY' && dailyBearish);
-    const counterWeekly = (result.signal === 'SELL' && weeklyBullish) || (result.signal === 'BUY' && weeklyBearish);
-    const counterHtf    = (result.signal === 'SELL' && htfBullish) || (result.signal === 'BUY' && htfBearish);
+    // Higher-TF bias for scalp uses 1H/4H macro bias; swing uses weekly
+    const htfBiasForAdjustment = tradingStyle === 'scalp'
+      ? (scalpMacroBias ?? htfBiasDir)
+      : weeklyBiasDir;
+    const biasAlignedForSignal = !(
+      (result.signal === 'SELL' && htfBiasForAdjustment === 'bullish') ||
+      (result.signal === 'BUY'  && htfBiasForAdjustment === 'bearish')
+    );
 
-    if (counterWeekly) {
-      result.autoTradeRecommended = false;
-      result.keyRisks = [...(result.keyRisks ?? []),
-        `Auto-trade blocked: ${result.signal} signal fights the WEEKLY trend (${weeklyBullish ? 'BULLISH' : 'BEARISH'}) — hardest rule, no exceptions`,
-      ];
-    } else if (counterDaily) {
-      result.autoTradeRecommended = false;
-      result.keyRisks = [...(result.keyRisks ?? []),
-        `Auto-trade blocked: ${result.signal} signal fights the Daily trend — no counter-trend auto-trades`,
-      ];
-    } else if (counterHtf) {
-      result.autoTradeRecommended = false;
-      result.keyRisks = [...(result.keyRisks ?? []),
-        `Auto-trade blocked: ${result.signal} signal fights the ${htf} trend`,
-      ];
-    }
+    // Bias confidence adjustment — regime-specific learned value (never hardcoded)
+    const biasIsNeutralForAdj = htfBiasForAdjustment === 'neutral';
+    const learnedBiasAdj = getLearnedBiasAdjustment(biasAlignedForSignal, biasIsNeutralForAdj, activeProfile);
+    result.confidence = Math.max(0, Math.min(100, result.confidence + learnedBiasAdj));
 
-    // Record alignment for quality tier
-    dailyAligned  = !counterDaily;
-    weeklyAligned = !counterWeekly;
-  } else if (result.signal !== 'HOLD') {
-    // For non-auto signals, still compute alignment for quality tier
-    const dailyBullish  = dailyTrend.includes('BULLISH');
-    const dailyBearish  = dailyTrend.includes('BEARISH');
-    const weeklyBullish = weeklyTrend.includes('BULLISH');
-    const weeklyBearish = weeklyTrend.includes('BEARISH');
-    dailyAligned  = !((result.signal === 'SELL' && dailyBullish)  || (result.signal === 'BUY' && dailyBearish));
-    weeklyAligned = !((result.signal === 'SELL' && weeklyBullish) || (result.signal === 'BUY' && weeklyBearish));
-  }
-
-  // ── Post-Groq indicator contradiction check ───────────────────────────────
-  // If the AI outputs BUY/SELL but ALL hard indicators disagree → block auto-trade
-  if (result.signal !== 'HOLD' && result.autoTradeRecommended) {
-    const { lean } = computeIndicatorLean(indicators, lastCandle);
-    if (result.signal === 'BUY' && lean === 'BEAR') {
-      result.autoTradeRecommended = false;
-      result.keyRisks = [...(result.keyRisks ?? []),
-        `Auto-trade blocked: BUY signal but indicator stack is strongly BEARISH (EMA+MACD+RSI all negative)`,
-      ];
-    } else if (result.signal === 'SELL' && lean === 'BULL') {
-      result.autoTradeRecommended = false;
-      result.keyRisks = [...(result.keyRisks ?? []),
-        `Auto-trade blocked: SELL signal but indicator stack is strongly BULLISH (EMA+MACD+RSI all positive)`,
+    if (!biasAlignedForSignal) {
+      const profileLabel = regimeProfile ? `${preliminaryRegime}-regime` : 'global';
+      result.keyRisks = [
+        ...(result.keyRisks ?? []),
+        `Counter-trend vs ${tradingStyle === 'scalp' ? '1H/4H' : 'weekly'} bias (${htfBiasForAdjustment}) — ${profileLabel} learned adj: ${learnedBiasAdj >= 0 ? '+' : ''}${learnedBiasAdj.toFixed(1)}pts`,
       ];
     }
-  }
 
-  if (!result.signal || !['BUY', 'SELL', 'HOLD'].includes(result.signal)) {
-    throw new Error('AI returned invalid signal value');
+    // Dynamic confidence blend — regime-specific weights supplement Groq's score
+    const finalRegime = detectMarketRegime(indicators, structureObj, atrTrend, upcomingEvts.length > 0);
+    const dynamicConf = computeDynamicConfidence({
+      triggerTypes:         execTriggerTypes,
+      session:              utcHourToSession(utcHour),
+      regime:               finalRegime,
+      biasAligned:          biasAlignedForSignal,
+      biasIsNeutral:        biasIsNeutralForAdj,
+      obQualityScore:       scoreOBQuality(structureObj, lastCandle.close, result.signal as 'BUY' | 'SELL'),
+      fvgQualityScore:      scoreFVGQuality(structureObj, lastCandle.close, result.signal as 'BUY' | 'SELL'),
+      displacementStrength: scoreDisplacement(candles, indicators),
+      clusterExpectancy:    null,
+    }, activeProfile);
+    result.confidence = blendConfidence(result.confidence, dynamicConf, activeProfile?.is_reliable ?? false);
   }
 
   // ── Assign quality tier ───────────────────────────────────────────────────
@@ -473,6 +547,15 @@ export async function getSignal(
   const pipsToSL   = toPips(validPair, Math.abs(result.entry - result.stopLoss));
   const pipsToTP   = toPips(validPair, Math.abs(result.takeProfit - result.entry));
   const validUntil = new Date(Date.now() + VALIDITY_MS[validTf]);
+
+  // Derive bias state for telemetry
+  const htfBiasForTelemetry = tradingStyle === 'scalp'
+    ? (scalpMacroBias ?? htfBiasDir)
+    : weeklyBiasDir;
+  const biasAlignedForTelemetry = !(
+    (result.signal === 'SELL' && htfBiasForTelemetry === 'bullish') ||
+    (result.signal === 'BUY'  && htfBiasForTelemetry === 'bearish')
+  );
 
   const signal = await Signal.create({
     userId:               userObjectId,
@@ -507,6 +590,35 @@ export async function getSignal(
   triggerAutoTrade(signal as unknown as ISignal).catch((e) =>
     console.error('[signal.service] triggerAutoTrade error:', e)
   );
+
+  // ── Trade telemetry (non-blocking, never throws) ──────────────────────────
+  if (result.signal !== 'HOLD') {
+    logTradeEvent({
+      userId,
+      signalId:          String(signal._id),
+      symbol:            validPair,
+      timeframe:         validTf,
+      tradingStyle,
+      utcHour,
+      indicators,
+      structure:         structureObj,
+      atrTrend,
+      signal:            result.signal as 'BUY' | 'SELL',
+      entryPrice:        result.entry,
+      stopLossPrice:     result.stopLoss,
+      takeProfitPrice:   result.takeProfit,
+      confidenceScore:   result.confidence,
+      higherTfBias:      htfBiasForTelemetry,
+      biasAligned:       biasAlignedForTelemetry,
+      obQualityScore:    scoreOBQuality(structureObj, lastCandle.close, result.signal as 'BUY' | 'SELL'),
+      fvgQualityScore:   scoreFVGQuality(structureObj, lastCandle.close, result.signal as 'BUY' | 'SELL'),
+      displacementStrength: scoreDisplacement(candles, indicators),
+      structureScore:    strategyDecision.confluenceScore * 12,  // 0–96 mapped to rough 0–100
+      triggerTypesFired: strategyDecision.reasons
+        .filter((r) => r.startsWith('[SCALP-EXEC]') || r.startsWith('Execution trigger'))
+        .map((r) => r.split(':')[0].replace('[SCALP-EXEC] ', '').trim()),
+    }).catch(() => { /* telemetry is always non-fatal */ });
+  }
 
   return signal;
 }

@@ -67,6 +67,18 @@ export async function triggerAutoTrade(signal: ISignal): Promise<void> {
       return;
     }
 
+    // ── Max 1 open auto-trade per pair — prevents doubling into same direction
+    const openOnPair = await Trade.countDocuments({
+      userId: signal.userId,
+      pair:   signal.pair,
+      status: 'open',
+      source: 'ai_auto',
+    });
+    if (openOnPair >= 1) {
+      console.log(`[AutoTrader] Already have open auto-trade on ${signal.pair} for user ${signal.userId}`);
+      return;
+    }
+
     // ── Daily trade limit ──────────────────────────────────────────────────
     const todayStart = new Date();
     todayStart.setUTCHours(0, 0, 0, 0);

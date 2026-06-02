@@ -25,6 +25,7 @@ import alertRoutes from './routes/alert.routes';
 import analyticsRoutes from './routes/analytics.routes';
 import calendarRoutes from './routes/calendar.routes';
 import mt5Routes from './routes/mt5.routes';
+import telemetryRoutes from './routes/telemetry.routes';
 
 import { checkAlerts } from './services/alert.service';
 import NewsCache from './models/NewsCache.model';
@@ -71,7 +72,8 @@ app.use('/api/rag', ragRoutes);
 app.use('/api/alerts', alertRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/calendar', calendarRoutes);
-app.use('/api/mt5',      mt5Routes);
+app.use('/api/mt5',       mt5Routes);
+app.use('/api/telemetry', telemetryRoutes);
 
 // ─── Health Check ─────────────────────────────────────────────────────────────
 

@@ -5,6 +5,16 @@ import { SignalPayload, SignalResult } from "../types/signal.types";
 import { IAiReview, ITrade } from "../types/trade.types";
 import { INewsItem } from "../types/news.types";
 
+// ─── Explain payload (rule engine decided direction; AI explains + computes levels) ──
+
+export interface ExplainPayload extends SignalPayload {
+  decidedSignal:    'BUY' | 'SELL';   // HOLD is handled upstream — never reaches here
+  strategyReasons:  string[];
+  strategyBlockers: string[];
+  suggestedSL:      number | null;
+  suggestedTP:      number | null;
+}
+
 // ─── Models ───────────────────────────────────────────────────────────────────
 
 const GROQ_MODELS = {
@@ -107,6 +117,118 @@ export async function generateSignal(
     autoTradeRecommended,
     confluenceScore,
     entryType:      (parsed.entryType === 'LIMIT' ? 'LIMIT' : 'MARKET'),
+  };
+}
+
+// ─── explainSignal ────────────────────────────────────────────────────────────
+// The RULE ENGINE has already decided BUY/SELL/HOLD.
+// This function's sole job is to compute precise entry/SL/TP levels and write the
+// professional narrative. It does NOT second-guess the signal direction.
+
+export async function explainSignal(payload: ExplainPayload): Promise<SignalResult> {
+  const { decidedSignal, strategyReasons, strategyBlockers, suggestedSL, suggestedTP } = payload;
+
+  const isScalp = payload.tradingStyle === 'scalp';
+  const atr     = payload.atr;
+  const slMult  = isScalp ? 0.75 : 1.5;
+  const tpMult  = isScalp ? 1.5  : 3.0;
+  const minRR   = isScalp ? '1:1.5' : '1:2';
+
+  const slHint = suggestedSL
+    ? `${suggestedSL.toFixed(5)} (from order block / structure)`
+    : `~${(decidedSignal === 'BUY' ? payload.price - atr * slMult : payload.price + atr * slMult).toFixed(5)} (ATR fallback)`;
+
+  const tpHint = suggestedTP
+    ? `${suggestedTP.toFixed(5)} (from FVG / swing level)`
+    : `~${(decidedSignal === 'BUY' ? payload.price + atr * tpMult : payload.price - atr * tpMult).toFixed(5)} (ATR fallback)`;
+
+  const prompt = `You are AURA, an institutional-grade FOREX and Gold AI analyst.
+
+THE RULE ENGINE HAS DECIDED: ${decidedSignal}
+
+Rule engine reasons:
+${strategyReasons.map((r) => `  • ${r}`).join('\n') || '  • Indicator and structure alignment confirmed'}
+
+Your job — DO NOT change the signal direction. Focus only on execution:
+1. Calculate precise entry price (current: ${payload.price}, or limit at nearest OB/FVG if LIMIT entry)
+2. Set SL beyond nearest structure (suggested: ${slHint})
+3. Set TP at next structure target (suggested: ${tpHint})
+4. Achieve minimum R:R ${minRR}
+5. Write a 3-4 sentence professional reasoning citing: HTF bias, key structure signal, indicator confirmation, and what invalidates the setup
+6. List 2-3 key risks
+
+Market context:
+  Pair: ${payload.pair} | TF: ${payload.timeframe} | Price: ${payload.price}
+  Session: ${payload.session} (${payload.sessionRating})
+  ATR: ${atr.toFixed(5)} | ADX: ${payload.adx.toFixed(1)} | RSI: ${payload.rsi.toFixed(1)}
+  EMA20: ${payload.ema20.toFixed(5)} | EMA50: ${payload.ema50.toFixed(5)} | EMA200: ${payload.ema200.toFixed(5)}
+  MACD histogram: ${payload.macd.histogram.toFixed(5)}
+  Weekly: ${payload.weeklyTrend || 'N/A'} | Daily: ${payload.dailyTrend} | HTF: ${payload.higherTfTrend}
+  Key levels: ${payload.keyLevels || 'none'}
+  Structure: ${payload.structureContext || 'none'}
+  News: ${payload.upcomingNews || 'none'}
+
+Output valid JSON only:
+{
+  "confidence": 0-100,
+  "bullScore": 0-100,
+  "bearScore": 0-100,
+  "confluenceScore": 0-8,
+  "entryType": "MARKET" | "LIMIT",
+  "reasoning": "3-4 professional sentences",
+  "entry": number,
+  "takeProfit": number,
+  "stopLoss": number,
+  "riskReward": "1:X.X",
+  "keyRisks": ["risk1", "risk2"],
+  "timeHorizon": "${isScalp ? '5-30 minutes' : '2-12 hours'}",
+  "autoTradeRecommended": true | false
+}`;
+
+  const response = await withTimeout(
+    groqClient.chat.completions.create({
+      model: GROQ_MODELS.ANALYSIS,
+      messages: [
+        {
+          role: 'system',
+          content: 'You are AURA, an institutional FOREX analyst. The signal direction is already decided by the rule engine. Your job is execution precision and narrative only. Respond with valid JSON only.',
+        },
+        { role: 'user', content: prompt },
+      ],
+      temperature: 0.25,
+      max_tokens: 900,
+      response_format: { type: 'json_object' },
+    }),
+  );
+
+  const content = response.choices[0]?.message?.content;
+  if (!content) throw new Error('Groq returned empty response for explainSignal');
+
+  const parsed = safeParseJSON<SignalResult & { autoTradeRecommended?: boolean }>(content);
+
+  const confidence     = Math.min(100, Math.max(0, parsed.confidence ?? 75));
+  const confluenceScore = Math.min(8, Math.max(0, parsed.confluenceScore ?? 5));
+
+  const autoTradeRecommended =
+    confidence >= (isScalp ? 70 : 75) &&
+    confluenceScore >= (isScalp ? 6 : 7) &&
+    parsed.autoTradeRecommended === true;
+
+  return {
+    signal:              decidedSignal,
+    confidence,
+    bullScore:           Math.min(100, Math.max(0, parsed.bullScore ?? 50)),
+    bearScore:           Math.min(100, Math.max(0, parsed.bearScore ?? 50)),
+    reasoning:           parsed.reasoning ?? strategyReasons.join('. '),
+    entry:               parsed.entry ?? payload.price,
+    takeProfit:          parsed.takeProfit ?? payload.price,
+    stopLoss:            parsed.stopLoss ?? payload.price,
+    riskReward:          parsed.riskReward ?? '0:0',
+    keyRisks:            Array.isArray(parsed.keyRisks) ? parsed.keyRisks : [],
+    timeHorizon:         parsed.timeHorizon ?? 'Unknown',
+    autoTradeRecommended,
+    confluenceScore,
+    entryType:           parsed.entryType === 'LIMIT' ? 'LIMIT' : 'MARKET',
   };
 }
 
@@ -230,7 +352,13 @@ CONFLUENCE CHECKLIST — score 1 point each (total → confluenceScore 0-8)
   [5] MACD histogram AGREES (positive for BUY, negative for SELL)
   [6] ADX ≥ ${adxThreshold} (confirmed momentum)
   [7] Stochastic NOT in opposing extreme (%K < 80 for BUY entry; %K > 20 for SELL entry)
-  [8] Candlestick pattern or BB level supports signal
+  [8] Candlestick pattern OR structure signal confirms (BOS/CHOCH/liquidity sweep/OB/FVG aligns with direction)
+
+  Structure bonus points (these still cap confluenceScore at 8, but displace weak checks):
+  • Market structure trend (BOS sequence) matches signal direction → counts as [1] if weekly unavailable
+  • Liquidity sweep reversed into signal direction → replaces [8] with higher weight
+  • Entry at or near an Order Block → satisfies [8]
+  • Price in Discount for BUY or Premium for SELL → bonus context (not a separate point, but improves entry quality score)
 
 QUALITY THRESHOLDS (${isScalp ? 'SCALP MODE' : 'SWING MODE'}):
   confluenceScore ≥ ${confluenceGood} → A+ setup → full confidence BUY/SELL
@@ -245,7 +373,23 @@ ${payload.keyLevels || 'No key levels identified'}
   ⚠ SL MUST be placed BEYOND the nearest structure level, not mid-air.
   ⚠ TP MUST target the next structure level — do not set TP past resistance (BUY) or support (SELL).
   ⚠ If price is already AT a key level, factor this into entry type (LIMIT vs MARKET).
+${payload.structureContext ? `
+═══════════════════════════════════════════════════════
+INSTITUTIONAL MARKET STRUCTURE (ICT / Smart Money)
+═══════════════════════════════════════════════════════
+${payload.structureContext}
 
+  STRUCTURE TRADING RULES:
+  • CHOCH detected → reversal likely; signal MUST align with CHOCH direction or output HOLD
+  • BOS detected   → trend continuation valid; confirm with HTF bias before entry
+  • Liquidity Sweep reversed → high-probability reversal zone; prioritise entries here
+  • Order Block present → ideal entry zone; SL below OB low (BUY) or above OB high (SELL)
+  • FVG present → price drawn to fill imbalance; use as TP target or entry zone on retrace
+  • PREMIUM zone → avoid BUY entries (price too expensive); prefer SELL setups
+  • DISCOUNT zone → avoid SELL entries (price too cheap); prefer BUY setups
+  • confluenceScore +1 if structure trend matches proposed signal direction
+  • confluenceScore +1 if a liquidity sweep or CHOCH confirms entry direction
+` : ''}
 ═══════════════════════════════════════════════════════
 ADDITIONAL CONTEXT
 ═══════════════════════════════════════════════════════

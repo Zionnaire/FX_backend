@@ -75,11 +75,19 @@ export async function evaluatePendingSignals(): Promise<void> {
       const candles = await getOHLCV(sig.pair, sig.timeframe as ValidTimeframe);
       if (candles.length === 0) continue;
 
-      const checkPrice  = candles[candles.length - 1].close;
-      const ps          = pipSize(sig.pair);
-      const rawMove     = checkPrice - sig.entry;
-      const pipMove     = Math.round((rawMove / ps) * 10) / 10;
+      // Use candles SINCE the signal was created for accurate intrabar TP/SL detection.
+      // Checking only the current close misses TP/SL hits that occurred earlier intrabar.
+      const signalCreatedTs = Math.floor(new Date(sig.createdAt ?? now).getTime() / 1000);
+      const candlesSince    = candles.filter((c) => c.time > signalCreatedTs);
+      const evalCandles     = candlesSince.length > 0 ? candlesSince : candles.slice(-1);
 
+      const maxHigh    = Math.max(...evalCandles.map((c) => c.high));
+      const minLow     = Math.min(...evalCandles.map((c) => c.low));
+      const checkPrice = evalCandles[evalCandles.length - 1].close;
+
+      const ps        = pipSize(sig.pair);
+      const rawMove   = checkPrice - sig.entry;
+      const pipMove   = Math.round((rawMove / ps) * 10) / 10;
       const movedUp   = rawMove > ps;
       const movedDown = rawMove < -ps;
 
@@ -87,23 +95,22 @@ export async function evaluatePendingSignals(): Promise<void> {
       let outcome: ISignalAccuracyOutcome = 'flat';
 
       if (sig.signal === 'BUY') {
-        wasCorrect = movedUp;
-        if (sig.takeProfit && checkPrice >= sig.takeProfit)     outcome = 'tp_hit';
-        else if (sig.stopLoss && checkPrice <= sig.stopLoss)    outcome = 'sl_hit';
-        else if (movedUp)                                       outcome = 'moved_correct';
-        else if (movedDown)                                     outcome = 'moved_wrong';
-        else                                                    outcome = 'flat';
+        // Use intrabar high to detect TP hit; intrabar low to detect SL hit
+        if (sig.takeProfit && maxHigh >= sig.takeProfit)     { outcome = 'tp_hit';       wasCorrect = true; }
+        else if (sig.stopLoss && minLow <= sig.stopLoss)     { outcome = 'sl_hit';       wasCorrect = false; }
+        else if (movedUp)                                    { outcome = 'moved_correct'; wasCorrect = true; }
+        else if (movedDown)                                  { outcome = 'moved_wrong';  wasCorrect = false; }
+        else                                                 { outcome = 'flat';          wasCorrect = false; }
       } else if (sig.signal === 'SELL') {
-        wasCorrect = movedDown;
-        if (sig.takeProfit && checkPrice <= sig.takeProfit)     outcome = 'tp_hit';
-        else if (sig.stopLoss && checkPrice >= sig.stopLoss)    outcome = 'sl_hit';
-        else if (movedDown)                                     outcome = 'moved_correct';
-        else if (movedUp)                                       outcome = 'moved_wrong';
-        else                                                    outcome = 'flat';
+        // Use intrabar low to detect TP hit; intrabar high to detect SL hit
+        if (sig.takeProfit && minLow <= sig.takeProfit)      { outcome = 'tp_hit';       wasCorrect = true; }
+        else if (sig.stopLoss && maxHigh >= sig.stopLoss)    { outcome = 'sl_hit';       wasCorrect = false; }
+        else if (movedDown)                                  { outcome = 'moved_correct'; wasCorrect = true; }
+        else if (movedUp)                                    { outcome = 'moved_wrong';  wasCorrect = false; }
+        else                                                 { outcome = 'flat';          wasCorrect = false; }
       } else {
-        // HOLD — correct if move is less than 10 pips in either direction
         wasCorrect = Math.abs(pipMove) < 10;
-        outcome    = wasCorrect ? 'flat' : (movedUp ? 'moved_wrong' : 'moved_wrong');
+        outcome    = wasCorrect ? 'flat' : 'moved_wrong';
       }
 
       await SignalAccuracy.create({
